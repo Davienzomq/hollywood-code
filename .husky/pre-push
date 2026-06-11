@@ -17,4 +17,8 @@ if (process.versions.bun !== expectedBunVersion) {
   console.warn(`Warning: Bun version ${process.versions.bun} differs from expected ${expectedBunVersion}`);
 }
 '
-bun typecheck
+# Hollywood fork: desktop/enterprise are excluded on Windows checkouts —
+# their custom-elements.d.ts are git symlinks, which materialize as plain
+# text files without Developer Mode and break tsgo. Re-include them once
+# Developer Mode + core.symlinks=true are enabled.
+bun turbo typecheck --filter=!@opencode-ai/desktop --filter=!@opencode-ai/enterprise
