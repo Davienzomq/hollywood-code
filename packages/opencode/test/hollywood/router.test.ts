@@ -52,6 +52,28 @@ describe("hollywood router candidates", () => {
   test("unknown provider yields no candidates (falls back to default)", () => {
     expect(candidatesFor("mystery-ai", "low")).toEqual([])
   })
+
+  test("HOLLYWOOD_TIERS env extends the casting table to any provider", () => {
+    const prev = process.env["HOLLYWOOD_TIERS"]
+    process.env["HOLLYWOOD_TIERS"] = JSON.stringify({
+      mistral: { low: ["mistral-small"], high: ["mistral-large"] },
+    })
+    expect(candidatesFor("mistral", "low")).toEqual(["mistral-small"])
+    expect(candidatesFor("mistral", "high")).toEqual(["mistral-large"])
+    expect(candidatesFor("mistral", "mid")).toEqual([])
+
+    // per-tier user override beats the built-in, other tiers keep built-ins
+    process.env["HOLLYWOOD_TIERS"] = JSON.stringify({ openai: { low: ["my-tiny"] } })
+    expect(candidatesFor("openai", "low")).toEqual(["my-tiny"])
+    expect(candidatesFor("openai", "high")[0]).toBe("gpt-5.5")
+
+    // invalid JSON is ignored safely
+    process.env["HOLLYWOOD_TIERS"] = "{not json"
+    expect(candidatesFor("openai", "low")).toContain("gpt-5.4-mini")
+
+    if (prev === undefined) delete process.env["HOLLYWOOD_TIERS"]
+    else process.env["HOLLYWOOD_TIERS"] = prev
+  })
 })
 
 describe("hollywood router toggle", () => {

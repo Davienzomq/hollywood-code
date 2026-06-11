@@ -657,6 +657,15 @@ export const layer = Layer.effect(
         const found = yield* provider.getModel(base.value.providerID, candidateID).pipe(Effect.option)
         if (Option.isSome(found)) return { providerID: base.value.providerID, modelID: candidateID }
       }
+      // Providers without a casting table (no built-in, no HOLLYWOOD_TIERS):
+      // opencode already knows the cheap model of dozens of providers via
+      // getSmallModel (priority lists + cfg.small_model + plugin hook), so the
+      // low tier gets a double out of the box on ANY configured provider.
+      // Mid/high fall back to the user's standing default (the star).
+      if (tier === "low" && candidates.length === 0) {
+        const small = yield* provider.getSmallModel(base.value.providerID)
+        if (small) return { providerID: base.value.providerID, modelID: small.id }
+      }
       return base.value
     })
 

@@ -62,7 +62,34 @@ provider), hard scenes get the star automatically. Use this to your advantage:
 - Small or atomic tasks: do them directly — subagent overhead costs more than
   it saves. When in doubt, prefer direct.`
 
+// User-defined casting tables: HOLLYWOOD_TIERS env var holding JSON, e.g.
+// {"mistral":{"low":["mistral-small"],"high":["mistral-large"]},
+//  "ollama":{"low":["llama3.2:3b"],"high":["llama3.3:70b"]}}
+// Per-tier user entries override the built-ins, so ANY provider — including
+// local ones — can have doubles and a star. (opencode.json schema support is
+// planned; the env var works everywhere today.) Parsed lazily and re-read
+// when the raw value changes; invalid JSON is ignored safely.
+let envTiers: Record<string, Partial<Record<Tier, string[]>>> | undefined
+let envTiersRaw: string | undefined
+function userTiers() {
+  const raw = process.env["HOLLYWOOD_TIERS"]
+  if (raw !== envTiersRaw) {
+    envTiersRaw = raw
+    envTiers = undefined
+    if (raw) {
+      try {
+        envTiers = JSON.parse(raw)
+      } catch {
+        envTiers = undefined
+      }
+    }
+  }
+  return envTiers
+}
+
 export function candidatesFor(providerID: string, tier: Tier): string[] {
+  const user = userTiers()?.[providerID]?.[tier]
+  if (Array.isArray(user) && user.length) return user
   return TIER_CANDIDATES[providerID]?.[tier] ?? []
 }
 

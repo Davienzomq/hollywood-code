@@ -66,7 +66,15 @@ classifier in the request pipeline.
   subtask by its own content. Router off = upstream inherit behavior.
 - [x] `hollywood` global command: `%USERPROFILE%\.bun\bin\hollywood.cmd` —
   run from any folder (cwd = project). `hollywood --version` works.
-- [ ] Tier→model config in opencode.json (replace built-in candidate maps)
+- [x] UNIVERSAL PROVIDERS: (a) unknown providers get a low-tier double out of
+  the box via `provider.getSmallModel` (priority lists for dozens of
+  providers + `cfg.small_model` + plugin hook); mid/high fall back to the
+  star. (b) `HOLLYWOOD_TIERS` env var (JSON) defines/overrides casting tables
+  per provider — works for Mistral, Ollama, anything.
+- [ ] Tier→model config in opencode.json (nicer surface than the env var —
+  needs a `hollywood` key in the core config schema)
+- [ ] Compile `hollycode.exe` (bun build --compile) so Task Manager shows the
+  brand; optional installer for Apps & Programs
 - [ ] Rebrand layer 2: remaining UI strings
 - [ ] Phase 2: native subagent orchestration
 - [ ] Windows note: kill servers by PID/port — stopping the wrapper leaves a
