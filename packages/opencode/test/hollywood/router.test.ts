@@ -44,6 +44,7 @@ describe("hollywood router candidates", () => {
   test("known providers have low-tier doubles", () => {
     expect(candidatesFor("anthropic", "low")).toContain("claude-haiku-4-5")
     expect(candidatesFor("openai", "low")).toContain("gpt-5-nano")
+    expect(candidatesFor("openai", "low")).toContain("gpt-5.4-mini")
     expect(candidatesFor("google", "low")).toContain("gemini-3-flash")
   })
 

@@ -644,17 +644,22 @@ export const layer = Layer.effect(
         .map((p) => p.text)
         .join("\n")
       if (!text.trim()) return undefined
+      // Base = the user's standing default, NOT the session's last-used model:
+      // routed doubles would otherwise become sticky and a later high-tier
+      // message would inherit a small model. Every message re-scores from here.
+      const base = yield* provider.defaultModel().pipe(Effect.option)
+      if (Option.isNone(base)) return undefined
+      const star = { providerID: base.value.providerID, modelID: base.value.modelID }
       const { tier } = HollywoodRouter.scoreMessage(text)
-      if (tier === "high") return undefined
-      const base = yield* currentModel(input.sessionID)
-      const candidates = HollywoodRouter.candidatesFor(base.providerID, tier)
-      if (candidates.includes(base.modelID)) return undefined
+      if (tier === "high") return star
+      const candidates = HollywoodRouter.candidatesFor(star.providerID, tier)
+      if (candidates.includes(star.modelID)) return star
       for (const candidate of candidates) {
         const candidateID = ModelV2.ID.make(candidate)
-        const found = yield* provider.getModel(base.providerID, candidateID).pipe(Effect.option)
-        if (Option.isSome(found)) return { providerID: base.providerID, modelID: candidateID }
+        const found = yield* provider.getModel(star.providerID, candidateID).pipe(Effect.option)
+        if (Option.isSome(found)) return { providerID: star.providerID, modelID: candidateID }
       }
-      return undefined
+      return star
     })
 
     const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {

@@ -43,10 +43,25 @@ classifier in the request pipeline.
   explicit user choice (TUI pick, agent model, session model) always wins;
   primary non-hidden agents only; `HOLLYWOOD_ROUTER=off` to disable.
   Typecheck clean, 10 unit tests green (`test/hollywood/router.test.ts`).
-- [ ] Live smoke test in the TUI (needs provider auth)
+- [x] Live smoke test (Codex OAuth, headless server + API): "oi" auto-routed
+  to `gpt-5.4-mini` with zero manual selection — the double works. Explicit
+  user choice respected (TUI pick stayed on 5.5). Failsafe fallback verified.
+- [x] Rebrand layer 1a: TUI wordmark OPENCODE → HOLLY CODE (`tui/src/logo.ts`)
+- [ ] **KNOWN BUG (next session):** high-tier messages don't return to the
+  star. Cause: "who is the star" is delegated to `provider.defaultModel()`,
+  whose "recents" state drifts with our own routed messages. Fix: the router
+  owns ALL tiers — add explicit `high` candidates per provider in
+  `hollywood/router.ts` (openai: gpt-5.5/gpt-5 · anthropic: opus/sonnet ·
+  google: ultra), validated against the live catalog; star = first available.
+- [ ] Integrate the stuntdouble skill itself into the system (part of the
+  project's heart): ship it as a bundled skill/agent instruction so the
+  ORCHESTRATION layer (decompose → parallel subagents per tier → star
+  verification) runs on top of the router.
 - [ ] Tier→model config in opencode.json (replace built-in candidate maps)
-- [ ] Rebrand
+- [ ] Rebrand layer 2: `hollywood` command wrapper; remaining UI strings
 - [ ] Phase 2: native subagent orchestration
+- [ ] Windows note: kill servers by PID/port — stopping the wrapper leaves a
+  zombie `bun` holding the port (cost a debugging hour).
 
 ## License
 

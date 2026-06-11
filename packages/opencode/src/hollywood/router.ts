@@ -21,8 +21,9 @@ const TIER_CANDIDATES: Record<string, { low: string[]; mid: string[] }> = {
     mid: ["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4"],
   },
   openai: {
-    low: ["gpt-5-nano", "gpt-5-mini"],
-    mid: ["gpt-5-mini", "gpt-5"],
+    // Codex/ChatGPT OAuth exposes the gpt-5.x line; API keys expose nano/mini.
+    low: ["gpt-5.4-mini", "gpt-5-nano", "gpt-5-mini"],
+    mid: ["gpt-5.4", "gpt-5-mini", "gpt-5"],
   },
   google: {
     low: ["gemini-3-flash", "gemini-2.5-flash"],
