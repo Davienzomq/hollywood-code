@@ -52,11 +52,16 @@ WhatsApp adapter, voice input (Whisper), scheduled `/task` prompts,
 Discord adapter.
 
 ### Phase 1 tasks
-1. [ ] `packages/telegram` skeleton (copy packages/slack layout) + grammY
-2. [ ] Session mapping + prompt bridge + SSE streaming to edited messages
-3. [ ] Allowlist + env config + `hollycode telegram` CLI subcommand
-4. [ ] Live test: prompt from phone → router casts → reply on phone
-5. [ ] Windows service / background mode so it survives terminal close
+1. [x] `packages/telegram` (mirrors packages/slack) + grammY ^1.30; typecheck clean
+2. [x] Session mapping (chatID→sessionID, persisted to ~/.hollywood-telegram-sessions.json)
+       + prompt bridge (no model → router auto-casts) + live tool progress via
+       edited status message (event.subscribe)
+3. [x] Fail-closed allowlist (HOLLYWOOD_TG_ALLOWED_IDS) + env config + commands
+       /new /status /stop /start /help. Run via `bun run dev` in packages/telegram.
+4. [ ] LIVE TEST (user): BotFather token + own id in .env → bun run dev →
+       message the bot → "oi" replies labeled with the cast model
+5. [ ] v2: `hollycode telegram` CLI subcommand; background/service mode;
+       inline-keyboard permission approvals; voice; WhatsApp; Discord
 
 ---
 
