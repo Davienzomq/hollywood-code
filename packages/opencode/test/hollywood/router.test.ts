@@ -36,9 +36,10 @@ describe("hollywood router scoring", () => {
 })
 
 describe("hollywood router candidates", () => {
-  test("high tier never overrides (downgrade-only)", () => {
-    expect(candidatesFor("anthropic", "high")).toEqual([])
-    expect(candidatesFor("openai", "high")).toEqual([])
+  test("high tier names the star explicitly (router owns all tiers)", () => {
+    expect(candidatesFor("openai", "high")[0]).toBe("gpt-5.5")
+    expect(candidatesFor("anthropic", "high")).toContain("claude-opus-4-8")
+    expect(candidatesFor("google", "high").length).toBeGreaterThan(0)
   })
 
   test("known providers have low-tier doubles", () => {

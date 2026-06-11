@@ -1,8 +1,9 @@
 // Hollywood Code router — automatic per-message model selection.
-// Scores the user message with the stuntdouble 4-dimension heuristic and,
-// when the scene is cheap, casts a stunt double (smaller model of the SAME
-// provider). High scores return no override so the session default (the
-// star) stays in charge. Pure module: no Effect, no IO — easy to test.
+// Scores the user message with the stuntdouble 4-dimension heuristic and
+// casts the right model of the SAME provider for the tier: stunt doubles
+// (low/mid) for cheap scenes, the star (high) for the hard ones. The router
+// owns the whole casting table — it never asks opencode's drifting
+// recent/default state who should play. Pure module: no Effect, no IO.
 
 export type Tier = "low" | "mid" | "high"
 
@@ -11,23 +12,26 @@ export interface RouteResult {
   score: number
 }
 
-// Ordered candidate model IDs per provider, cheapest-capable first. The
-// caller validates availability and falls back to the next candidate (or to
-// the session default when none resolve). High tier intentionally has no
-// candidates: never upgrade, only downgrade.
-const TIER_CANDIDATES: Record<string, { low: string[]; mid: string[] }> = {
+// Hollywood owns the full casting table. The caller validates availability
+// against live provider credentials, but never asks opencode's recent/default
+// model memory which model should play a tier.
+const TIER_CANDIDATES: Record<string, Record<Tier, string[]>> = {
   anthropic: {
     low: ["claude-haiku-4-5", "claude-3-5-haiku"],
     mid: ["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4"],
+    // Fable 5 is the frontier tier; Opus 4.8 is the current Opus.
+    high: ["claude-fable-5", "claude-opus-4-8", "claude-opus-4-5", "claude-opus-4-1"],
   },
   openai: {
     // Codex/ChatGPT OAuth exposes the gpt-5.x line; API keys expose nano/mini.
     low: ["gpt-5.4-mini", "gpt-5-nano", "gpt-5-mini"],
     mid: ["gpt-5.4", "gpt-5-mini", "gpt-5"],
+    high: ["gpt-5.5", "gpt-5.4-codex", "gpt-5.4", "gpt-5"],
   },
   google: {
     low: ["gemini-3-flash", "gemini-2.5-flash"],
     mid: ["gemini-3-pro", "gemini-2.5-pro"],
+    high: ["gemini-3-ultra", "gemini-ultra"],
   },
 }
 
@@ -37,7 +41,6 @@ export function isEnabled(): boolean {
 }
 
 export function candidatesFor(providerID: string, tier: Tier): string[] {
-  if (tier === "high") return []
   return TIER_CANDIDATES[providerID]?.[tier] ?? []
 }
 

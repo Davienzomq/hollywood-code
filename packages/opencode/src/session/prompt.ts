@@ -634,9 +634,9 @@ export const layer = Layer.effect(
       return yield* provider.defaultModel().pipe(Effect.orDie)
     })
 
-    // Hollywood Code: score the message and, when the scene is cheap, cast a
-    // stunt double — a smaller model of the same provider. Downgrade-only:
-    // high scores return undefined so the session default (the star) stays.
+    // Hollywood Code auto mode: when the caller does not send input.model, the
+    // router owns the per-message casting decision. Explicit input.model is the
+    // manual/pinned-model toggle and bypasses this path below.
     const hollywoodModel = Effect.fnUntraced(function* (input: PromptInput) {
       if (!HollywoodRouter.isEnabled()) return undefined
       const text = input.parts
@@ -644,22 +644,20 @@ export const layer = Layer.effect(
         .map((p) => p.text)
         .join("\n")
       if (!text.trim()) return undefined
-      // Base = the user's standing default, NOT the session's last-used model:
-      // routed doubles would otherwise become sticky and a later high-tier
-      // message would inherit a small model. Every message re-scores from here.
-      const base = yield* provider.defaultModel().pipe(Effect.option)
+      const base = yield* Effect.gen(function* () {
+        const cfg = yield* config.get()
+        if (cfg.model) return Provider.parseModel(cfg.model)
+        return yield* provider.defaultModel()
+      }).pipe(Effect.option)
       if (Option.isNone(base)) return undefined
-      const star = { providerID: base.value.providerID, modelID: base.value.modelID }
       const { tier } = HollywoodRouter.scoreMessage(text)
-      if (tier === "high") return star
-      const candidates = HollywoodRouter.candidatesFor(star.providerID, tier)
-      if (candidates.includes(star.modelID)) return star
+      const candidates = HollywoodRouter.candidatesFor(base.value.providerID, tier)
       for (const candidate of candidates) {
         const candidateID = ModelV2.ID.make(candidate)
-        const found = yield* provider.getModel(star.providerID, candidateID).pipe(Effect.option)
-        if (Option.isSome(found)) return { providerID: star.providerID, modelID: candidateID }
+        const found = yield* provider.getModel(base.value.providerID, candidateID).pipe(Effect.option)
+        if (Option.isSome(found)) return { providerID: base.value.providerID, modelID: candidateID }
       }
-      return star
+      return base.value
     })
 
     const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
@@ -679,10 +677,10 @@ export const layer = Layer.effect(
         .where(eq(SessionTable.id, input.sessionID))
         .get()
         .pipe(Effect.orDie)
-      const routed =
-        !input.model && !ag.model && !current?.model && ag.mode === "primary" && !ag.hidden
-          ? yield* hollywoodModel(input)
-          : undefined
+      // Auto mode re-scores every prompt and ignores previous automatic
+      // ModelSwitched state. Manual mode stays explicit: input.model or an
+      // agent model still wins and disables the router for this prompt.
+      const routed = !input.model && !ag.model && ag.mode === "primary" && !ag.hidden ? yield* hollywoodModel(input) : undefined
       const model = input.model ?? ag.model ?? routed ?? (yield* currentModel(input.sessionID))
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
       const full =
