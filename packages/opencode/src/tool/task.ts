@@ -10,6 +10,7 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
+import * as HollywoodRouter from "@/hollywood/router"
 import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -164,10 +165,18 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      // Hollywood: when the subagent has no pinned model and the router is on,
+      // leave the model undefined so the child session is cast per subtask
+      // content (cheap subtasks get doubles, hard ones the star). Router off =
+      // upstream behavior: inherit the parent model.
+      const model =
+        next.model ??
+        (HollywoodRouter.isEnabled()
+          ? undefined
+          : {
+              modelID: msg.info.modelID,
+              providerID: msg.info.providerID,
+            })
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
@@ -188,10 +197,8 @@ export const TaskTool = Tool.define(
         const result = yield* ops.prompt({
           messageID: MessageID.ascending(),
           sessionID: nextSession.id,
-          model: {
-            modelID: model.modelID,
-            providerID: model.providerID,
-          },
+          // undefined model = Hollywood auto mode for this subtask
+          model: model ? { modelID: model.modelID, providerID: model.providerID } : undefined,
           variant: next.model ? undefined : variant,
           agent: next.name,
           parts,

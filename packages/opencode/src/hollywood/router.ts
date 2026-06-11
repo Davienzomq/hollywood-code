@@ -40,6 +40,28 @@ export function isEnabled(): boolean {
   return v !== "off" && v !== "0" && v !== "false"
 }
 
+// Appended to the system prompt of primary agents when the router is on.
+// The router casts every prompt (including subagent prompts), so the
+// orchestration layer is pure instruction: decompose, parallelize, verify.
+export const ORCHESTRATION_PROMPT = `# Hollywood orchestration (stuntdouble)
+This harness auto-casts the model for every prompt — including every subagent
+prompt: cheap scenes go to stunt doubles (smaller models of the same
+provider), hard scenes get the star automatically. Use this to your advantage:
+- For large tasks with 2+ independent parts (features, multi-file builds,
+  research + implementation), decompose and dispatch subtasks with the task
+  tool ("general" for work, "explore" for read-only research). Run independent
+  subtasks in parallel. Workers start cold: each subtask prompt must carry
+  full context (paths, conventions, exact deliverables).
+- Phrase mechanical subtasks plainly (boilerplate, formatting, simple content)
+  so they are cast to cheap doubles; phrase analysis/architecture subtasks
+  explicitly so they get stronger models.
+- After all subtasks complete, dispatch ONE final verification subtask:
+  "Review the integrated result against the original request for production —
+  fix inconsistencies directly and report what you changed." (Critical
+  phrasing casts the star.)
+- Small or atomic tasks: do them directly — subagent overhead costs more than
+  it saves. When in doubt, prefer direct.`
+
 export function candidatesFor(providerID: string, tier: Tier): string[] {
   return TIER_CANDIDATES[providerID]?.[tier] ?? []
 }

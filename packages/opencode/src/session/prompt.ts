@@ -680,7 +680,10 @@ export const layer = Layer.effect(
       // Auto mode re-scores every prompt and ignores previous automatic
       // ModelSwitched state. Manual mode stays explicit: input.model or an
       // agent model still wins and disables the router for this prompt.
-      const routed = !input.model && !ag.model && ag.mode === "primary" && !ag.hidden ? yield* hollywoodModel(input) : undefined
+      // Subagents route too (task tool omits the model when the router is on),
+      // so each subtask is cast by its own content; hidden internal agents
+      // (title/compaction/summary) are never routed.
+      const routed = !input.model && !ag.model && !ag.hidden ? yield* hollywoodModel(input) : undefined
       const model = input.model ?? ag.model ?? routed ?? (yield* currentModel(input.sessionID))
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
       const full =
@@ -1362,6 +1365,12 @@ export const layer = Layer.effect(
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
             const system = [...env, ...instructions, ...(skills ? [skills] : [])]
+            // Hollywood: teach primary agents the stuntdouble orchestration —
+            // decompose big tasks into parallel subagents (each auto-cast by
+            // the router) and close with a star verification pass.
+            if (HollywoodRouter.isEnabled() && agent.mode === "primary" && !agent.hidden) {
+              system.push(HollywoodRouter.ORCHESTRATION_PROMPT)
+            }
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({

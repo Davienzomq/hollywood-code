@@ -55,15 +55,19 @@ classifier in the request pipeline.
   re-scores every prompt; `input.model`/agent model = manual pin. Live proof
   in one session: "oi" → gpt-5.4-mini (double), architecture spec → gpt-5.5
   (star returns).
-- [ ] Integration tests for prompt-level routing (Codex's item 6): oi→mini,
-  architecture→5.5, manual pick wins, missing candidate falls back — use
-  `test/session/prompt.test.ts` harness + `test/lib/llm-server.ts`.
-- [ ] Integrate the stuntdouble skill itself into the system (part of the
-  project's heart): ship it as a bundled skill/agent instruction so the
-  ORCHESTRATION layer (decompose → parallel subagents per tier → star
-  verification) runs on top of the router.
+- [x] Integration tests (Codex's item 6): `test/hollywood/prompt-routing.test.ts`
+  — oi→low double, architecture→star (even after a low turn), manual pick
+  wins, missing candidates fall back. 4 green; upstream suites untouched.
+- [x] STUNTDOUBLE ORCHESTRATION LAYER: primary agents get the orchestration
+  system prompt (`ORCHESTRATION_PROMPT` in `hollywood/router.ts`, injected in
+  `prompt.ts` runLoop) — decompose big tasks into parallel task-tool
+  subagents, close with a star verification subtask. The task tool now omits
+  the model for unpinned subagents (`tool/task.ts`) so the router casts EACH
+  subtask by its own content. Router off = upstream inherit behavior.
+- [x] `hollywood` global command: `%USERPROFILE%\.bun\bin\hollywood.cmd` —
+  run from any folder (cwd = project). `hollywood --version` works.
 - [ ] Tier→model config in opencode.json (replace built-in candidate maps)
-- [ ] Rebrand layer 2: `hollywood` command wrapper; remaining UI strings
+- [ ] Rebrand layer 2: remaining UI strings
 - [ ] Phase 2: native subagent orchestration
 - [ ] Windows note: kill servers by PID/port — stopping the wrapper leaves a
   zombie `bun` holding the port (cost a debugging hour).
