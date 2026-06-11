@@ -47,12 +47,17 @@ classifier in the request pipeline.
   to `gpt-5.4-mini` with zero manual selection — the double works. Explicit
   user choice respected (TUI pick stayed on 5.5). Failsafe fallback verified.
 - [x] Rebrand layer 1a: TUI wordmark OPENCODE → HOLLY CODE (`tui/src/logo.ts`)
-- [ ] **KNOWN BUG (next session):** high-tier messages don't return to the
-  star. Cause: "who is the star" is delegated to `provider.defaultModel()`,
-  whose "recents" state drifts with our own routed messages. Fix: the router
-  owns ALL tiers — add explicit `high` candidates per provider in
-  `hollywood/router.ts` (openai: gpt-5.5/gpt-5 · anthropic: opus/sonnet ·
-  google: ultra), validated against the live catalog; star = first available.
+- [x] **Star-drift bug FIXED** (cross-agent session: Codex GPT-5.5 confirmed
+  the diagnosis + found the second stickiness source — the `!current?.model`
+  guard self-disabled after the first routed message via ModelSwitched
+  persistence — and drafted the fix; finished/corrected/live-verified by
+  Claude). Router owns ALL tiers with explicit candidates; auto mode
+  re-scores every prompt; `input.model`/agent model = manual pin. Live proof
+  in one session: "oi" → gpt-5.4-mini (double), architecture spec → gpt-5.5
+  (star returns).
+- [ ] Integration tests for prompt-level routing (Codex's item 6): oi→mini,
+  architecture→5.5, manual pick wins, missing candidate falls back — use
+  `test/session/prompt.test.ts` harness + `test/lib/llm-server.ts`.
 - [ ] Integrate the stuntdouble skill itself into the system (part of the
   project's heart): ship it as a bundled skill/agent instruction so the
   ORCHESTRATION layer (decompose → parallel subagents per tier → star
