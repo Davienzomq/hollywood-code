@@ -36,9 +36,15 @@ classifier in the request pipeline.
 ## Status
 
 - [x] Fork cloned, upstream remote wired (branch `dev`)
-- [ ] Explore the codebase: locate model resolution in the request flow
-- [ ] Router prototype
-- [ ] Tier→model config
+- [x] Explore the codebase: model resolution found at `session/prompt.ts`
+  `createUserMessage` — chain `input.model ?? ag.model ?? currentModel()`
+- [x] Router prototype: `src/hollywood/router.ts` (pure scorer + per-provider
+  tier candidates) wired into the chain as `?? routed ??`. Downgrade-only;
+  explicit user choice (TUI pick, agent model, session model) always wins;
+  primary non-hidden agents only; `HOLLYWOOD_ROUTER=off` to disable.
+  Typecheck clean, 10 unit tests green (`test/hollywood/router.test.ts`).
+- [ ] Live smoke test in the TUI (needs provider auth)
+- [ ] Tier→model config in opencode.json (replace built-in candidate maps)
 - [ ] Rebrand
 - [ ] Phase 2: native subagent orchestration
 

@@ -9,6 +9,7 @@ import { SessionRevert } from "./revert"
 import { Session } from "./session"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
+import * as HollywoodRouter from "@/hollywood/router"
 
 import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
@@ -633,6 +634,29 @@ export const layer = Layer.effect(
       return yield* provider.defaultModel().pipe(Effect.orDie)
     })
 
+    // Hollywood Code: score the message and, when the scene is cheap, cast a
+    // stunt double — a smaller model of the same provider. Downgrade-only:
+    // high scores return undefined so the session default (the star) stays.
+    const hollywoodModel = Effect.fnUntraced(function* (input: PromptInput) {
+      if (!HollywoodRouter.isEnabled()) return undefined
+      const text = input.parts
+        .filter((p): p is SessionV1.TextPartInput => p.type === "text")
+        .map((p) => p.text)
+        .join("\n")
+      if (!text.trim()) return undefined
+      const { tier } = HollywoodRouter.scoreMessage(text)
+      if (tier === "high") return undefined
+      const base = yield* currentModel(input.sessionID)
+      const candidates = HollywoodRouter.candidatesFor(base.providerID, tier)
+      if (candidates.includes(base.modelID)) return undefined
+      for (const candidate of candidates) {
+        const candidateID = ModelV2.ID.make(candidate)
+        const found = yield* provider.getModel(base.providerID, candidateID).pipe(Effect.option)
+        if (Option.isSome(found)) return { providerID: base.providerID, modelID: candidateID }
+      }
+      return undefined
+    })
+
     const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
       const agentName = input.agent
       const ag = agentName ? yield* agents.get(agentName) : yield* agents.defaultInfo()
@@ -650,7 +674,11 @@ export const layer = Layer.effect(
         .where(eq(SessionTable.id, input.sessionID))
         .get()
         .pipe(Effect.orDie)
-      const model = input.model ?? ag.model ?? (yield* currentModel(input.sessionID))
+      const routed =
+        !input.model && !ag.model && !current?.model && ag.mode === "primary" && !ag.hidden
+          ? yield* hollywoodModel(input)
+          : undefined
+      const model = input.model ?? ag.model ?? routed ?? (yield* currentModel(input.sessionID))
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
       const full =
         !input.variant && ag.variant && same
