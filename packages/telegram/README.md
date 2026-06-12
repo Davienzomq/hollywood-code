@@ -1,50 +1,53 @@
-# @opencode-ai/telegram — Hollywood Code remote control
+# Hollywood Code — Remote Control (Telegram)
 
-Work with Hollywood Code from your phone over Telegram. Every prompt goes
-through the normal session path, so the **router auto-casts the model per
-message** — cheap doubles for small asks, the star for hard work — with no
-extra setup.
+Work on your project from your phone. Every prompt goes through the normal
+session path, so the Hollywood router auto-casts the model per message
+(cheap doubles for simple scenes, the star for hard work) — for free.
 
-## Setup (1 minute)
+## Setup (one command)
 
-1. Message **@BotFather** on Telegram → `/newbot` → copy the token.
-2. Message **@userinfobot** → copy your numeric user ID.
-3. Create `packages/telegram/.env` (see `.env.example`):
+From any terminal, in the folder of the project you want to control:
 
 ```
-HOLLYWOOD_TG_TOKEN=123456:ABC-your-bot-token
-HOLLYWOOD_TG_ALLOWED_IDS=your-numeric-id
-HOLLYWOOD_TG_DIRECTORY=C:\path\to\your\project
+hollycode-remote
 ```
 
-4. Run it (from the repo, with bun on PATH):
+**First run** launches an interactive wizard:
 
-```bash
-cd packages/telegram
-bun run dev
+```
+🎬 Hollywood Code — Remote Control Setup
+1. Create a bot with @BotFather (/newbot) and paste the token here:
+   > <token>
+   ✓ Connected as @your_bot
+2. Send /start to @your_bot from your phone...
+   📱 You (ID 12345) wants to pair. Approve? [y/n] y
+   ✓ Paired!
+3. Config saved. ⚡ Remote control online as @your_bot
 ```
 
-5. Message your bot. `/start` for help.
+**Next runs** skip the wizard and go straight online. Keep the window open
+while you use it (it's the bridge server). `Ctrl+C` stops it.
 
-## Commands
+Config is saved to `~/.config/hollywood/telegram.json`. Power users can skip
+the wizard with env vars (`HOLLYWOOD_TG_TOKEN`, `HOLLYWOOD_TG_ALLOWED_IDS`,
+`HOLLYWOOD_TG_DIRECTORY`).
 
-| Command | Action |
+## On your phone
+
+| Send | Does |
 |---|---|
-| (any text) | Work on your project; reply shows which model was cast |
-| `/new` | Start a fresh session |
-| `/status` | Show current session + directory |
-| `/stop` | Abort the running task |
-| `/start` `/help` | Help |
+| any text | the agent works on your project; reply is labeled with the cast model |
+| `/new` | start a fresh session |
+| `/status` | show the current session + directory |
+| `/stop` | abort the running task |
 
 ## Security
 
-- **Allowlist is fail-closed**: only the IDs in `HOLLYWOOD_TG_ALLOWED_IDS` are
-  served; everyone else is silently ignored. Empty list = refuse all.
-- Token lives in `.env` (gitignored), never committed.
-- Long-polling — no exposed ports or webhooks.
+Fail-closed allowlist: only paired Telegram IDs are answered; everyone else is
+silently ignored. The token lives only in your local config, never committed.
 
-## Notes / roadmap (v2)
+## Notes / v2 backlog
 
-- Live tool progress is shown by editing a status message as tools complete.
-- v2: inline-keyboard permission approvals, voice input, WhatsApp (secondary
-  number — Baileys violates WhatsApp TOS, ban risk), Discord.
+- The bridge boots our own server from source (cwd = your project directory).
+- v2: permission approval via inline keyboards, voice input, WhatsApp/Discord
+  adapters, a `--daemon` background mode, and a `/remote-control` TUI shortcut.

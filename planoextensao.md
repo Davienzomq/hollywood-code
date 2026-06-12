@@ -58,10 +58,18 @@ Discord adapter.
        edited status message (event.subscribe)
 3. [x] Fail-closed allowlist (HOLLYWOOD_TG_ALLOWED_IDS) + env config + commands
        /new /status /stop /start /help. Run via `bun run dev` in packages/telegram.
-4. [ ] LIVE TEST (user): BotFather token + own id in .env → bun run dev →
-       message the bot → "oi" replies labeled with the cast model
-5. [ ] v2: `hollycode telegram` CLI subcommand; background/service mode;
-       inline-keyboard permission approvals; voice; WhatsApp; Discord
+4. [x] ONE-COMMAND WIZARD UX (OpenClaw `onboard` style): `hollycode-remote`
+       global launcher → first run = interactive wizard (`setup.ts`: paste
+       token → getMe validates → pairing captures the phone's ID via getUpdates
+       → y/n approve → saves `~/.config/hollywood/telegram.json`), next runs go
+       straight online. Fixed two reasons the manual path failed: grammy wasn't
+       installed (now 1.43) and the SDK's createOpencode spawns a missing global
+       `opencode` binary — replaced with bootServer() spawning OUR server from
+       source via process.execPath, cwd = project dir. Typecheck clean, smoke ok.
+5. [ ] LIVE TEST (user): `hollycode-remote` in a new terminal → wizard → pair
+       phone → send "oi" → reply labeled with the cast model
+6. [ ] v2: background/`--daemon` mode; inline-keyboard permission approvals;
+       voice; WhatsApp; Discord; `/remote-control` TUI shortcut
 
 ---
 
