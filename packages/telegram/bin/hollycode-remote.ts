@@ -113,7 +113,9 @@ if (bridgeMode || foreground) {
   if (process.platform === "win32") {
     // Start-Process creates a fully independent hidden process — bun's own
     // detached spawn leaves a wrapper→child chain that dies with the console.
-    const psArgs = ["run", SELF, "--bridge", ...passthrough].map((a) => `'${a.replaceAll("'", "''")}'`).join(",")
+    // Each argument gets embedded double quotes: -ArgumentList joins elements
+    // with spaces WITHOUT quoting, which split paths like "Bedroom Elegance".
+    const psArgs = ["run", SELF, "--bridge", ...passthrough].map((a) => `'"${a.replaceAll("'", "''")}"'`).join(",")
     const psCmd =
       `Start-Process -FilePath '${process.execPath}' -ArgumentList @(${psArgs}) ` +
       `-WindowStyle Hidden -WorkingDirectory '${PKG_DIR}' ` +
