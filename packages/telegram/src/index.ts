@@ -736,7 +736,7 @@ export async function startBridge(config: RemoteConfig) {
   bot.command("remote", async (ctx) => {
     const sid = sessionIdFor(ctx)
     const s = sid ? await opencode.client.session.get({ path: { id: sid } }).catch(() => null) : null
-    const title = ((s?.data as any)?.title || "").replace(/[_*[\]()~`>#+\-=|{}.!]/g, "\\$&")
+    const title = (s?.data as any)?.title || ""
     const m =
       config.model === "auto"
         ? "🎬 auto (router)"
@@ -744,13 +744,14 @@ export async function startBridge(config: RemoteConfig) {
           ? `${defaultModel.providerID}/${defaultModel.modelID}`
           : "server default"
     const sessionLabel = sid ? `${title} (${sid.slice(0, 12)}…)` : "no active session"
+    // plain text on purpose: session titles routinely contain characters that
+    // break Telegram Markdown parsing (unclosed entities → 400, no reply)
     await ctx.reply(
-      "✅ *You're connected to Telegram*\n" +
-      `📁 Directory: \`${DIRECTORY}\`\n` +
-      `🤖 Model: \`${m}\`\n` +
-      `📋 Session: ${sessionLabel}\n` +
-      `👤 User: \`${ctx.from!.id}\``,
-      { parse_mode: "Markdown" },
+      "✅ You're connected to Telegram\n" +
+        `📁 Directory: ${DIRECTORY}\n` +
+        `🤖 Model: ${m}\n` +
+        `📋 Session: ${sessionLabel}\n` +
+        `👤 User: ${ctx.from!.id}`,
     )
   })
 
