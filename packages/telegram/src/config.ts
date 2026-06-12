@@ -7,6 +7,8 @@ export interface RemoteConfig {
   allowedIds: string[]
   directory: string
   model?: string
+  /** true = approve everything automatically; false/undefined = ask via Telegram buttons */
+  autoAllow?: boolean
 }
 
 const DIR = path.join(os.homedir(), ".config", "hollywood")

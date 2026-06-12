@@ -94,15 +94,27 @@ export async function startBridge(config: RemoteConfig) {
     }
   }
 
-  // Auto-create opencode.jsonc with permissions if missing
-  const opencodeConfigPath = path.join(DIRECTORY, "opencode.jsonc")
-  if (!fs.existsSync(opencodeConfigPath)) {
-    fs.writeFileSync(opencodeConfigPath, JSON.stringify({
-      $schema: "https://opencode.ai/config.json",
-      permission: { external_directory: "allow", bash: "allow", read: "allow", write: "allow" },
-    }, null, 2))
-    console.log("Created", opencodeConfigPath)
+  // Permission mode: autoAllow=true → everything runs without asking;
+  // false (default) → server asks and we forward the request to Telegram buttons.
+  let autoAllow = config.autoAllow ?? false
+  const permissionBlock = () =>
+    autoAllow
+      ? { external_directory: "allow", bash: "allow", read: "allow", write: "allow", edit: "allow", webfetch: "allow" }
+      : { external_directory: "ask", bash: "ask", read: "allow", write: "ask", edit: "ask", webfetch: "allow" }
+  const applyPermissionMode = () => {
+    try {
+      const p = path.join(DIRECTORY, "opencode.jsonc")
+      const raw = fs.existsSync(p)
+        ? (JSON.parse(fs.readFileSync(p, "utf8")) as any)
+        : { $schema: "https://opencode.ai/config.json" }
+      raw.permission = permissionBlock()
+      fs.writeFileSync(p, JSON.stringify(raw, null, 2))
+      console.log(`Permission mode: ${autoAllow ? "auto-allow" : "ask via Telegram"}`)
+    } catch (err) {
+      console.error("Could not update opencode.jsonc:", err)
+    }
   }
+  applyPermissionMode()
 
   console.log("Starting Hollywood Code server...")
   let server = await bootServer(DIRECTORY)
@@ -186,22 +198,100 @@ export async function startBridge(config: RemoteConfig) {
     for (let i = 0; i < text.length; i += TELEGRAM_MAX) await ctx.reply(text.slice(i, i + TELEGRAM_MAX))
   }
 
-  const resolvePending = async (sid?: string) => {
-    // resolve permissions
+  // Pending approvals forwarded to Telegram (short keys: callback_data is limited to 64 bytes)
+  let cbSeq = 0
+  const pendingPerms = new Map<string, { api: "v1" | "v2"; sessionID: string; requestID: string }>()
+  const pendingQuestions = new Map<string, { sessionID: string; requestID: string; request: any }>()
+  const notified = new Set<string>()
+
+  const replyPermission = async (p: { api: "v1" | "v2"; sessionID: string; requestID: string }, reply: "once" | "always" | "reject") => {
+    if (p.api === "v1") {
+      await opencodeV2.permission.reply({ requestID: p.requestID, reply }).catch(() => {})
+    } else {
+      await opencodeV2.v2.session.permission.reply({ sessionID: p.sessionID, requestID: p.requestID, reply }).catch(() => {})
+    }
+  }
+
+  const notifyPermission = async (
+    chatId: number,
+    api: "v1" | "v2",
+    r: any,
+    label: string,
+  ) => {
+    const key = String(++cbSeq)
+    pendingPerms.set(key, { api, sessionID: r.sessionID, requestID: r.id })
+    await bot.api
+      .sendMessage(chatId, `🔐 Permission request:\n${label}`.slice(0, TELEGRAM_MAX), {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "✅ Allow once", callback_data: `pa:${key}:o` },
+              { text: "♾️ Always", callback_data: `pa:${key}:a` },
+              { text: "❌ Deny", callback_data: `pa:${key}:r` },
+            ],
+          ],
+        },
+      })
+      .catch(() => {})
+  }
+
+  const resolvePending = async (sid?: string, chatId?: number) => {
+    // permissions — the server publishes them on the GLOBAL /permission endpoint
+    // (v1 shape: permission/patterns); v2 session-scoped list kept as fallback.
+    const globalPerms = await opencodeV2.permission.list({}).catch(() => null)
+    const v1Requests: any[] = (globalPerms?.data as any) ?? []
+    for (const r of v1Requests) {
+      if (sid && r.sessionID !== sid) continue
+      if (autoAllow) {
+        await opencodeV2.permission.reply({ requestID: r.id, reply: "always" }).catch(() => {})
+        continue
+      }
+      if (notified.has(r.id) || !chatId) continue
+      notified.add(r.id)
+      const label = `${r.permission}${r.patterns?.length ? "\n" + r.patterns.slice(0, 5).join("\n") : ""}${r.metadata?.filepath ? `\n📄 ${r.metadata.filepath}` : ""}`
+      await notifyPermission(chatId, "v1", r, label)
+    }
     if (sid) {
       const perms = await opencodeV2.v2.session.permission.list({ sessionID: sid }).catch(() => null)
       const requests: any[] = (perms?.data as any)?.data ?? []
       for (const r of requests) {
-        await opencodeV2.v2.session.permission.reply({ sessionID: sid, requestID: r.id, reply: "always" }).catch(() => {})
+        if (autoAllow) {
+          await opencodeV2.v2.session.permission.reply({ sessionID: sid, requestID: r.id, reply: "always" }).catch(() => {})
+          continue
+        }
+        if (notified.has(r.id) || !chatId) continue
+        notified.add(r.id)
+        const label = `${r.action}${r.resources?.length ? "\n" + r.resources.slice(0, 5).join("\n") : ""}`
+        await notifyPermission(chatId, "v2", r, label)
       }
     }
-    // resolve questions
+    // questions
     const all: any = await opencodeV2.question.list({}).catch(() => null)
     const qs: any[] = all?.data ?? []
     for (const q of qs) {
       if (sid && q.sessionID !== sid) continue
-      const answers: string[][] = q.questions?.map((qq: any) => qq.options?.[0]?.label ? [qq.options[0].label] : ["ok"]) ?? []
-      await opencodeV2.v2.session.question.reply({ sessionID: q.sessionID, requestID: q.id, questionV2Reply: { answers } }).catch(() => {})
+      const first = q.questions?.[0]
+      if (autoAllow || !first?.options?.length || !chatId) {
+        if (!autoAllow && !chatId) continue // ask mode but nowhere to send — leave pending
+        const answers: string[][] =
+          q.questions?.map((qq: any) => (qq.options?.[0]?.label ? [qq.options[0].label] : ["ok"])) ?? []
+        await opencodeV2.v2.session.question
+          .reply({ sessionID: q.sessionID, requestID: q.id, questionV2Reply: { answers } })
+          .catch(() => {})
+        continue
+      }
+      if (notified.has(q.id)) continue
+      notified.add(q.id)
+      const key = String(++cbSeq)
+      pendingQuestions.set(key, { sessionID: q.sessionID, requestID: q.id, request: q })
+      const rows = first.options
+        .slice(0, 8)
+        .map((o: any, i: number) => [{ text: String(o.label || `Option ${i + 1}`).slice(0, 60), callback_data: `qa:${key}:${i}` }])
+      await bot.api
+        .sendMessage(chatId, `❓ ${first.question}`.slice(0, TELEGRAM_MAX), {
+          reply_markup: { inline_keyboard: rows },
+        })
+        .catch(() => {})
     }
   }
 
@@ -454,6 +544,37 @@ export async function startBridge(config: RemoteConfig) {
     return ctx.reply(`🧠 Current thinking: ${current}\nUsage: /thinking on|off|auto`)
   })
 
+  bot.command("autoallow", async (ctx) => {
+    const arg = ctx.message!.text.slice("/autoallow".length).trim().toLowerCase()
+    if (arg !== "on" && arg !== "off") {
+      return ctx.reply(
+        `🔐 Auto-allow is ${autoAllow ? "ON — everything approved automatically" : "OFF — approvals come here as buttons"}\nUsage: /autoallow on|off`,
+      )
+    }
+    const next = arg === "on"
+    if (next === autoAllow) return ctx.reply(`Already ${arg}.`)
+    autoAllow = next
+    config.autoAllow = autoAllow
+    saveConfig(config)
+    applyPermissionMode()
+    await ctx.reply(`♻️ Applying ${autoAllow ? "auto-allow" : "ask"} mode — restarting server...`)
+    try {
+      server.close()
+      server = await bootServer(DIRECTORY)
+      opencode = { client: createOpencodeClient({ baseUrl: server.url }) }
+      opencodeV2 = createV2Client({ baseUrl: server.url })
+      startEvents()
+    } catch (err) {
+      console.error("Restart failed:", err)
+      return ctx.reply("⚠️ Server restart failed — try /move to the same directory or restart the bot.")
+    }
+    return ctx.reply(
+      autoAllow
+        ? "✅ Auto-allow ON — tasks run without asking."
+        : "🔐 Ask mode ON — permission requests will arrive here with Approve/Deny buttons.",
+    )
+  })
+
   bot.command(["diff", "editor", "exit", "themes", "timeline", "timestamps", "stuntdouble", "connect", "mcps"], (ctx) =>
     ctx.reply(`⚠️ \`/${ctx.message!.text.split(" ")[0].slice(1)}\` is a CLI-only command.`),
   )
@@ -465,7 +586,8 @@ export async function startBridge(config: RemoteConfig) {
         "/model — show or change model\n/undo — undo last\n/fork — fork session\n/rename — rename session\n" +
         "/compact — compact session\n/export — export transcript\n/copy — copy transcript\n/agents — list agents\n" +
         "/skills — list skills\n/init — init with AGENTS.md\n/share — share session\n/review — review changes\n" +
-        "/move — change project dir\n/thinking — toggle thinking\n/remote — connection status\n\nSend any text to work on your project.",
+        "/move — change project dir\n/thinking — toggle thinking\n/remote — connection status\n" +
+        "/autoallow — on: approve everything · off: ask here with buttons\n\nSend any text to work on your project.",
     ),
   )
 
@@ -503,6 +625,41 @@ export async function startBridge(config: RemoteConfig) {
     await ctx.answerCallbackQuery()
   })
 
+  // permission approval buttons
+  bot.callbackQuery(/^pa:(.+):(o|a|r)$/, async (ctx) => {
+    const [, key, code] = ctx.callbackQuery.data!.split(":")
+    const p = pendingPerms.get(key!)
+    if (!p) return ctx.answerCallbackQuery({ text: "Expired" })
+    pendingPerms.delete(key!)
+    const reply = code === "o" ? "once" : code === "a" ? "always" : "reject"
+    await replyPermission(p, reply as "once" | "always" | "reject")
+    const label = reply === "once" ? "✅ Allowed once" : reply === "always" ? "♾️ Always allowed" : "❌ Denied"
+    const original = ctx.callbackQuery.message?.text ?? "🔐 Permission request"
+    await ctx.editMessageText(`${original}\n\n${label}`.slice(0, TELEGRAM_MAX)).catch(() => {})
+    await ctx.answerCallbackQuery({ text: label })
+  })
+
+  // question answer buttons
+  bot.callbackQuery(/^qa:(.+):(\d+)$/, async (ctx) => {
+    const [, key, idxRaw] = ctx.callbackQuery.data!.split(":")
+    const q = pendingQuestions.get(key!)
+    if (!q) return ctx.answerCallbackQuery({ text: "Expired" })
+    pendingQuestions.delete(key!)
+    const idx = Number(idxRaw)
+    const questions: any[] = q.request.questions ?? []
+    // chosen option answers the first question; any extra questions get their first option
+    const answers: string[][] = questions.map((qq: any, i: number) => {
+      const label = i === 0 ? qq.options?.[idx]?.label : qq.options?.[0]?.label
+      return [label || "ok"]
+    })
+    await opencodeV2.v2.session.question
+      .reply({ sessionID: q.sessionID, requestID: q.requestID, questionV2Reply: { answers } })
+      .catch(() => {})
+    const chosen = questions[0]?.options?.[idx]?.label || "ok"
+    await ctx.editMessageText(`❓ ${questions[0]?.question || "Question"}\n\n👉 ${chosen}`.slice(0, TELEGRAM_MAX)).catch(() => {})
+    await ctx.answerCallbackQuery({ text: "Answered" })
+  })
+
   // session picker: switch session
   bot.callbackQuery(/^ss:(.+)/, async (ctx) => {
     const sid = ctx.callbackQuery.data!.split(":")[1]
@@ -538,59 +695,70 @@ export async function startBridge(config: RemoteConfig) {
     )
   })
 
-  bot.on("message:text", async (ctx) => {
+  bot.on("message:text", (ctx) => {
     const text = ctx.message.text
     if (text.startsWith("/")) return
-    const chatId = ctx.chat.id.toString()
 
-    const sessionId = await getOrCreateSession(chatId)
-    if (!sessionId) return ctx.reply("Sorry, I couldn't create a session. Try /new.")
+    // Run the whole prompt flow DETACHED. grammY processes Telegram updates
+    // sequentially, so awaiting the prompt here would block the Allow/Deny
+    // callback_query from ever being handled: the prompt waits for the
+    // permission reply, the reply waits for this handler → deadlock.
+    void (async () => {
+      const chatId = ctx.chat.id.toString()
 
-    await ctx.replyWithChatAction("typing").catch(() => {})
-    const status = await ctx.reply("🎬 working...")
-    statusMessage.set(sessionId, { chatId: ctx.chat.id, messageId: status.message_id, lines: [] })
+      const sessionId = await getOrCreateSession(chatId)
+      if (!sessionId) {
+        await ctx.reply("Sorry, I couldn't create a session. Try /new.")
+        return
+      }
 
-    await resolvePending(sessionId)
+      await ctx.replyWithChatAction("typing").catch(() => {})
+      const status = await ctx.reply("🎬 working...")
+      statusMessage.set(sessionId, { chatId: ctx.chat.id, messageId: status.message_id, lines: [] })
 
-    const promptBody: any = { parts: [{ type: "text", text }] }
-    if (defaultModel) promptBody.model = defaultModel
+      await resolvePending(sessionId, ctx.chat.id)
 
-    const poller = setInterval(() => { void resolvePending(sessionId) }, 3000)
-    const result = await opencode.client.session
-      .prompt({ path: { id: sessionId }, body: promptBody })
-      .catch((err) => ({ error: err, data: undefined }))
-    clearInterval(poller)
-    await resolvePending(sessionId)
+      const promptBody: any = { parts: [{ type: "text", text }] }
+      if (defaultModel) promptBody.model = defaultModel
 
-    statusMessage.delete(sessionId)
+      const poller = setInterval(() => { void resolvePending(sessionId, ctx.chat.id) }, 3000)
+      const result = await opencode.client.session
+        .prompt({ path: { id: sessionId }, body: promptBody })
+        .catch((err) => ({ error: err, data: undefined }))
+      clearInterval(poller)
+      await resolvePending(sessionId, ctx.chat.id)
 
-    if ((result as any).error || !result.data) {
-      console.error("Prompt failed:", (result as any).error)
-      return ctx.reply("⚠️ Something went wrong. Try again or /new.")
-    }
+      statusMessage.delete(sessionId)
 
-    const data = result.data as any
-    const info = data.info as { modelID?: string; providerID?: string } | undefined
-    const parts = data.parts as Array<{ type: string; text?: string }> | undefined
+      if ((result as any).error || !result.data) {
+        console.error("Prompt failed:", (result as any).error)
+        await ctx.reply("⚠️ Something went wrong. Try again or /new.")
+        return
+      }
 
-    const reply =
-      parts
-        ?.filter((p) => p.type === "text")
-        .map((p) => p.text || "")
-        .join("\n")
-        .trim() || ""
+      const data = result.data as any
+      const info = data.info as { modelID?: string; providerID?: string } | undefined
+      const parts = data.parts as Array<{ type: string; text?: string }> | undefined
 
-    const modelLabel = info?.modelID ? `🎬 ${info.providerID}/${info.modelID}` : "🎬 done"
+      const reply =
+        parts
+          ?.filter((p) => p.type === "text")
+          .map((p) => p.text || "")
+          .join("\n")
+          .trim() || ""
 
-    if (reply) {
-      await bot.api.editMessageText(ctx.chat.id, status.message_id, modelLabel).catch(() => {})
-      await sendChunked(ctx, reply)
-    } else {
-      // No text parts — show error info if available
-      const errorPart = parts?.find((p) => p.type === "retry")
-      const errorMsg = errorPart ? `⚠️ ${(errorPart as any).error?.data?.message || "Error"}` : "⚠️ No text response"
-      await bot.api.editMessageText(ctx.chat.id, status.message_id, `${modelLabel}\n${errorMsg}`).catch(() => {})
-    }
+      const modelLabel = info?.modelID ? `🎬 ${info.providerID}/${info.modelID}` : "🎬 done"
+
+      if (reply) {
+        await bot.api.editMessageText(ctx.chat.id, status.message_id, modelLabel).catch(() => {})
+        await sendChunked(ctx, reply)
+      } else {
+        // No text parts — show error info if available
+        const errorPart = parts?.find((p) => p.type === "retry")
+        const errorMsg = errorPart ? `⚠️ ${(errorPart as any).error?.data?.message || "Error"}` : "⚠️ No text response"
+        await bot.api.editMessageText(ctx.chat.id, status.message_id, `${modelLabel}\n${errorMsg}`).catch(() => {})
+      }
+    })().catch((err) => console.error("Prompt flow failed:", err))
   })
 
   process.on("SIGINT", () => {
@@ -625,6 +793,7 @@ export async function startBridge(config: RemoteConfig) {
       { command: "review", description: "Review changes" },
       { command: "move", description: "Change project dir" },
       { command: "thinking", description: "Toggle thinking" },
+      { command: "autoallow", description: "Auto-approve on/off" },
       { command: "remote", description: "Connection status" },
       { command: "help", description: "Show all commands" },
     ])
@@ -649,7 +818,10 @@ process.on("unhandledRejection", (err) => {
   process.exit(1)
 })
 
-const isMain = process.argv[1] && (process.argv[1].includes("index.ts") || process.argv[1].includes("hollycode-remote"))
+// Only self-start when src/index.ts is the entrypoint. The bin/hollycode-remote.ts
+// launcher imports startBridge and starts the bridge itself — matching it here
+// caused TWO bots polling the same token (Telegram 409 conflicts).
+const isMain = process.argv[1] ? path.basename(process.argv[1]) === "index.ts" : false
 if (isMain) {
   await main()
 }
