@@ -16,9 +16,10 @@ let serverProc: ChildProcess | undefined
 
 function bootServer(directory: string): Promise<{ url: string; close: () => void }> {
   const serverIndex = path.resolve(HERE, "../../opencode/src/index.ts")
-  const env: Record<string, string> = {
+  // Router stays ON in the server: a pinned model is sent explicitly with each
+  // prompt and bypasses it; /model auto omits the model so the router casts.
+  const env: Record<string, string | undefined> = {
     ...process.env,
-    HOLLYWOOD_ROUTER: process.env.HOLLYWOOD_ROUTER ?? "off",
   }
   const proc = spawn(process.execPath, ["run", serverIndex, "serve", "--hostname", "127.0.0.1", "--port", "0"], {
     cwd: directory,
@@ -359,21 +360,46 @@ export async function startBridge(config: RemoteConfig) {
   bot.command("model", async (ctx) => {
     const msg = ctx.message!
     const text = msg.text.slice("/model".length).trim()
+    if (text === "auto") {
+      // Hollywood auto mode: prompts go out with NO model, the router casts
+      // each message (cheap scenes → doubles, hard scenes → the star).
+      config.model = "auto"
+      saveConfig(config)
+      // drop any pinned model from the project config so the router's base
+      // is the provider default (the star), not a previously pinned double
+      try {
+        const p = path.join(DIRECTORY, "opencode.jsonc")
+        const raw = readJsonc(p)
+        delete raw.model
+        fs.writeFileSync(p, JSON.stringify(raw, null, 2))
+      } catch { /* best-effort */ }
+      return ctx.reply(
+        "🎬 AUTO mode — the Hollywood router now casts each message:\n" +
+          "cheap chat → stunt double, hard tasks → the star.\n" +
+          "Each reply is labeled with the model that played.\n" +
+          "Pin again anytime with /model providerID/modelID",
+      )
+    }
     if (text) {
       const parts = text.split("/")
-      if (parts.length < 2) return ctx.reply("Invalid format. Use: /model providerID/modelID")
+      if (parts.length < 2) return ctx.reply("Invalid format. Use: /model providerID/modelID (or /model auto)")
       defaultModel = { providerID: parts[0], modelID: parts.slice(1).join("/") }
       config.model = text
       saveConfig(config)
       await opencode.client.config.update({ body: { model: text } as any }).catch(() => {})
       syncModelToFile(text)
-      return ctx.reply(`✅ Model set to ${text}`)
+      return ctx.reply(`✅ Model pinned to ${text}\nBack to auto-casting anytime: /model auto`)
     }
     const prov = await opencode.client.config.providers().catch(() => null)
     if (!prov?.data) return ctx.reply("Could not fetch providers.")
     const providers: any[] = (prov.data as any).providers ?? []
     if (!providers.length) return ctx.reply("No providers available.")
-    const cur = defaultModel ? `${defaultModel.providerID}/${defaultModel.modelID}` : "server default"
+    const cur =
+      config.model === "auto"
+        ? "🎬 auto (Hollywood router casts per message)"
+        : defaultModel
+          ? `${defaultModel.providerID}/${defaultModel.modelID}`
+          : "server default"
     const rows = providers.map((p: any) => {
       const keys = Object.keys(p.models || {})
       if (!keys.length) return []
@@ -711,7 +737,12 @@ export async function startBridge(config: RemoteConfig) {
     const sid = sessionIdFor(ctx)
     const s = sid ? await opencode.client.session.get({ path: { id: sid } }).catch(() => null) : null
     const title = ((s?.data as any)?.title || "").replace(/[_*[\]()~`>#+\-=|{}.!]/g, "\\$&")
-    const m = defaultModel ? `${defaultModel.providerID}/${defaultModel.modelID}` : "server default"
+    const m =
+      config.model === "auto"
+        ? "🎬 auto (router)"
+        : defaultModel
+          ? `${defaultModel.providerID}/${defaultModel.modelID}`
+          : "server default"
     const sessionLabel = sid ? `${title} (${sid.slice(0, 12)}…)` : "no active session"
     await ctx.reply(
       "✅ *You're connected to Telegram*\n" +
@@ -747,7 +778,8 @@ export async function startBridge(config: RemoteConfig) {
       await resolvePending(sessionId, ctx.chat.id)
 
       const promptBody: any = { parts: [{ type: "text", text }] }
-      if (defaultModel) promptBody.model = defaultModel
+      // auto mode: omit the model — the Hollywood router casts per message
+      if (defaultModel && config.model !== "auto") promptBody.model = defaultModel
 
       const poller = setInterval(() => { void resolvePending(sessionId, ctx.chat.id) }, 3000)
       const result = await opencode.client.session
