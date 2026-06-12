@@ -1,8 +1,6 @@
 # Hollywood Code — Remote Control (Telegram)
 
-Work on your project from your phone. Every prompt goes through the normal
-session path, so the Hollywood router auto-casts the model per message
-(cheap doubles for simple scenes, the star for hard work) — for free.
+Work on your project from your phone. Uses the same model as your terminal.
 
 ## Setup (one command)
 
@@ -26,20 +24,37 @@ hollycode-remote
 ```
 
 **Next runs** skip the wizard and go straight online. Keep the window open
-while you use it (it's the bridge server). `Ctrl+C` stops it.
+while you use it (it's the bridge server). `Ctrl+C` stops it cleanly.
 
 Config is saved to `~/.config/hollywood/telegram.json`. Power users can skip
 the wizard with env vars (`HOLLYWOOD_TG_TOKEN`, `HOLLYWOOD_TG_ALLOWED_IDS`,
-`HOLLYWOOD_TG_DIRECTORY`).
+`HOLLYWOOD_TG_DIRECTORY`, `HOLLYWOOD_TG_MODEL`).
 
 ## On your phone
 
 | Send | Does |
 |---|---|
-| any text | the agent works on your project; reply is labeled with the cast model |
+| any text | the agent works on your project; reply shows which model was used |
 | `/new` | start a fresh session |
 | `/status` | show the current session + directory |
 | `/stop` | abort the running task |
+
+## Installation (from source)
+
+```bash
+cd packages/telegram
+bun link
+hollycode-remote --directory /path/to/your/project
+```
+
+## Options
+
+```
+hollycode-remote --model anthropic/claude-sonnet-4-5 --directory ./my-project
+```
+
+- `--model <provider/id>` — override the model for Telegram prompts
+- `--directory <path>` — project directory (default: current dir)
 
 ## Security
 
@@ -48,6 +63,5 @@ silently ignored. The token lives only in your local config, never committed.
 
 ## Notes / v2 backlog
 
-- The bridge boots our own server from source (cwd = your project directory).
 - v2: permission approval via inline keyboards, voice input, WhatsApp/Discord
   adapters, a `--daemon` background mode, and a `/remote-control` TUI shortcut.

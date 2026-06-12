@@ -1,35 +1,31 @@
-// Hollywood Code — Telegram remote control entry point.
-// First run with no saved config → interactive setup wizard. After that → goes
-// straight online. Work with the agent from your phone; every prompt goes
-// through the normal session path, so the Hollywood router auto-casts the
-// model per message (doubles for cheap scenes, the star for hard ones).
-//
-// Architecture mirrors packages/slack: boot an embedded opencode server via
-// the SDK, map each Telegram chat to a session, stream tool progress back.
 import { Bot, type Context } from "grammy"
 import { createOpencodeClient, type ToolPart } from "@opencode-ai/sdk"
-import { spawn } from "node:child_process"
+import { createOpencodeClient as createV2Client } from "@opencode-ai/sdk/v2"
+import { spawn, type ChildProcess } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
-import { loadConfig, type RemoteConfig } from "./config"
+import { loadConfig, saveConfig, type RemoteConfig } from "./config"
 import { runWizard } from "./setup"
 
 const TELEGRAM_MAX = 4096
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
-// Boot OUR server from source (the SDK's createOpencode spawns a global
-// `opencode` binary, which a dev fork doesn't have). Running it ourselves with
-// cwd = the project directory also makes the agent operate on the right repo.
-// process.execPath is the bun runtime we're already running under.
+let serverProc: ChildProcess | undefined
+
 function bootServer(directory: string): Promise<{ url: string; close: () => void }> {
   const serverIndex = path.resolve(HERE, "../../opencode/src/index.ts")
+  const env: Record<string, string> = {
+    ...process.env,
+    HOLLYWOOD_ROUTER: process.env.HOLLYWOOD_ROUTER ?? "off",
+  }
   const proc = spawn(process.execPath, ["run", serverIndex, "serve", "--hostname", "127.0.0.1", "--port", "0"], {
     cwd: directory,
-    env: process.env,
+    env,
     stdio: ["ignore", "pipe", "inherit"],
   })
+  serverProc = proc
   return new Promise((resolve, reject) => {
     let buf = ""
     let settled = false
@@ -42,11 +38,11 @@ function bootServer(directory: string): Promise<{ url: string; close: () => void
     proc.stdout.on("data", (chunk: Buffer) => {
       if (settled) return
       buf += chunk.toString()
-      const match = buf.match(/listening on\s+(https?:\/\/[^\s]+)/)
+      const match = buf.match(/server listening on\s+(https?:\/\/[^\s]+)/)
       if (match) {
         settled = true
         clearTimeout(timer)
-        resolve({ url: match[1]!, close: () => proc.kill() })
+        resolve({ url: match[1]!, close: () => { proc.kill(); serverProc = undefined } })
       }
     })
     proc.on("exit", (code) => {
@@ -58,8 +54,14 @@ function bootServer(directory: string): Promise<{ url: string; close: () => void
   })
 }
 
+function cleanup() {
+  if (serverProc) {
+    serverProc.kill()
+    serverProc = undefined
+  }
+}
+
 async function main() {
-  // No token anywhere → first-time setup. Otherwise straight to online.
   let config = loadConfig()
   if (!config) {
     config = await runWizard(process.cwd())
@@ -70,11 +72,10 @@ async function main() {
   await startBridge(config)
 }
 
-async function startBridge(config: RemoteConfig) {
+export async function startBridge(config: RemoteConfig) {
   const ALLOWED = new Set(config.allowedIds)
-  const DIRECTORY = config.directory || process.cwd()
+  let DIRECTORY = config.directory || process.cwd()
 
-  // chatID -> sessionID, persisted so restarts keep the same threads.
   const STORE = path.join(os.homedir(), ".hollywood-telegram-sessions.json")
   const chatToSession = new Map<string, string>()
   try {
@@ -85,37 +86,70 @@ async function startBridge(config: RemoteConfig) {
   }
   const saveStore = () => {
     try {
-      fs.writeFileSync(STORE, JSON.stringify(Object.fromEntries(chatToSession), null, 2))
+      const tmp = STORE + ".tmp"
+      fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(chatToSession), null, 2))
+      fs.renameSync(tmp, STORE)
     } catch (err) {
       console.error("Could not persist session store:", err)
     }
   }
 
+  // Auto-create opencode.jsonc with permissions if missing
+  const opencodeConfigPath = path.join(DIRECTORY, "opencode.jsonc")
+  if (!fs.existsSync(opencodeConfigPath)) {
+    fs.writeFileSync(opencodeConfigPath, JSON.stringify({
+      $schema: "https://opencode.ai/config.json",
+      permission: { external_directory: "allow", bash: "allow", read: "allow", write: "allow" },
+    }, null, 2))
+    console.log("Created", opencodeConfigPath)
+  }
+
   console.log("Starting Hollywood Code server...")
-  const server = await bootServer(DIRECTORY)
-  const opencode = { client: createOpencodeClient({ baseUrl: server.url }) }
+  let server = await bootServer(DIRECTORY)
+  let opencode = { client: createOpencodeClient({ baseUrl: server.url }) }
+  let opencodeV2 = createV2Client({ baseUrl: server.url })
   console.log("Server ready. Project directory:", DIRECTORY)
+
+  // Auto-detect default model from the local OpenCode server
+  let defaultModel: { providerID: string; modelID: string } | undefined
+  try {
+    const prov = await opencode.client.config.providers()
+    const defaults = prov.data?.default as Record<string, string> | undefined
+    if (defaults) {
+      const entries = Object.entries(defaults)
+      const preferred = entries.find(([id]) => id === "opencode") ?? entries[0]
+      if (preferred) defaultModel = { providerID: preferred[0], modelID: preferred[1] }
+    }
+    if (defaultModel) console.log("Model auto-detected:", defaultModel.providerID + "/" + defaultModel.modelID)
+  } catch {
+    console.log("Could not detect default model, using server default")
+  }
 
   const bot = new Bot(config.token)
 
-  // Live tool progress: when a tool completes, edit that chat's status message
-  // so the phone shows "what the agent is doing right now".
   const statusMessage = new Map<string, { chatId: number; messageId: number; lines: string[] }>()
-  void (async () => {
-    const events = await opencode.client.event.subscribe()
-    for await (const event of events.stream) {
-      if (event.type !== "message.part.updated") continue
-      const part = event.properties.part as ToolPart
-      if (part.type !== "tool" || part.state.status !== "completed") continue
-      const status = statusMessage.get(part.sessionID)
-      if (!status) continue
-      status.lines.push(`✓ ${part.tool} — ${part.state.title}`)
-      const text = "🎬 working...\n" + status.lines.slice(-8).join("\n")
-      await bot.api.editMessageText(status.chatId, status.messageId, text.slice(0, TELEGRAM_MAX)).catch(() => {})
-    }
-  })()
+  let eventAbort = new AbortController()
+  const startEvents = () => {
+    eventAbort.abort()
+    eventAbort = new AbortController()
+    const sig = eventAbort.signal
+    void (async () => {
+      const events = await opencode.client.event.subscribe()
+      for await (const event of events.stream) {
+        if (sig.aborted) break
+        if (event.type !== "message.part.updated") continue
+        const part = event.properties.part as ToolPart
+        if (part.type !== "tool" || part.state.status !== "completed") continue
+        const status = statusMessage.get(part.sessionID)
+        if (!status) continue
+        status.lines.push(`✓ ${part.tool} — ${part.state.title}`)
+        const text = "🎬 working...\n" + status.lines.slice(-8).join("\n")
+        await bot.api.editMessageText(status.chatId, status.messageId, text.slice(0, TELEGRAM_MAX)).catch(() => {})
+      }
+    })()
+  }
+  startEvents()
 
-  // Fail-closed allowlist gate on every update.
   bot.use(async (ctx, next) => {
     const id = ctx.from?.id?.toString()
     if (!id || !ALLOWED.has(id)) {
@@ -138,39 +172,375 @@ async function startBridge(config: RemoteConfig) {
     return created.data.id
   }
 
+  const syncModelToFile = (model: string) => {
+    try {
+      const p = path.join(DIRECTORY, "opencode.jsonc")
+      const raw = JSON.parse(fs.readFileSync(p, "utf8")) as any
+      raw.model = model
+      fs.writeFileSync(p, JSON.stringify(raw, null, 2))
+    } catch { /* best-effort */ }
+  }
+
   const sendChunked = async (ctx: Context, text: string) => {
     if (!text) return
     for (let i = 0; i < text.length; i += TELEGRAM_MAX) await ctx.reply(text.slice(i, i + TELEGRAM_MAX))
   }
 
+  const resolvePending = async (sid?: string) => {
+    // resolve permissions
+    if (sid) {
+      const perms = await opencodeV2.v2.session.permission.list({ sessionID: sid }).catch(() => null)
+      const requests: any[] = (perms?.data as any)?.data ?? []
+      for (const r of requests) {
+        await opencodeV2.v2.session.permission.reply({ sessionID: sid, requestID: r.id, reply: "always" }).catch(() => {})
+      }
+    }
+    // resolve questions
+    const all: any = await opencodeV2.question.list({}).catch(() => null)
+    const qs: any[] = all?.data ?? []
+    for (const q of qs) {
+      if (sid && q.sessionID !== sid) continue
+      const answers: string[][] = q.questions?.map((qq: any) => qq.options?.[0]?.label ? [qq.options[0].label] : ["ok"]) ?? []
+      await opencodeV2.v2.session.question.reply({ sessionID: q.sessionID, requestID: q.id, questionV2Reply: { answers } }).catch(() => {})
+    }
+  }
+
+  const sessionIdFor = (ctx: Context) => chatToSession.get(ctx.chat!.id.toString())
+
   bot.command("start", (ctx) =>
     ctx.reply(
       "🎬 Hollywood Code — remote control\n" +
-        "Send me a message and I'll work on your project. The model is cast\n" +
-        "automatically per task (cheap doubles, the star for hard work).\n\n" +
-        "/new — start a fresh session\n/status — show the current session\n/stop — abort the running task\n/help — this message",
+        "Send me a message and I'll work on your project.\n\n" +
+        "/new · /sessions · /status · /stop · /model · /undo · /fork\n" +
+        "/rename · /compact · /export · /copy · /agents · /skills\n" +
+        "/review · /init · /share · /move · /thinking · /help",
     ),
   )
-  bot.command("help", (ctx) => ctx.reply("/new · /status · /stop — send any text to work on your project."))
+
   bot.command("new", (ctx) => {
     chatToSession.delete(ctx.chat.id.toString())
     saveStore()
     return ctx.reply("🆕 New session. Send your next message to begin.")
   })
-  bot.command("status", (ctx) => {
-    const sessionId = chatToSession.get(ctx.chat.id.toString())
-    return ctx.reply(sessionId ? `Session: ${sessionId}\nDirectory: ${DIRECTORY}` : "No active session yet. Send a message.")
+
+  bot.command("status", async (ctx) => {
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    const s = await opencode.client.session.get({ path: { id: sid } }).catch(() => null)
+    const m = s?.data ? `${(s.data as any).title} (${sid.slice(0, 12)}…)` : sid
+    return ctx.reply(`📁 ${m}\n📂 ${DIRECTORY}`)
   })
+
   bot.command("stop", async (ctx) => {
-    const sessionId = chatToSession.get(ctx.chat.id.toString())
-    if (!sessionId) return ctx.reply("No active session.")
-    await opencode.client.session.abort({ path: { id: sessionId } }).catch(() => {})
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    await opencode.client.session.abort({ path: { id: sid } }).catch(() => {})
     return ctx.reply("⏹️ Stopped.")
+  })
+
+  bot.command("model", async (ctx) => {
+    const msg = ctx.message!
+    const text = msg.text.slice("/model".length).trim()
+    if (text) {
+      const parts = text.split("/")
+      if (parts.length < 2) return ctx.reply("Invalid format. Use: /model providerID/modelID")
+      defaultModel = { providerID: parts[0], modelID: parts.slice(1).join("/") }
+      config.model = text
+      saveConfig(config)
+      await opencode.client.config.update({ body: { model: text } as any }).catch(() => {})
+      syncModelToFile(text)
+      return ctx.reply(`✅ Model set to ${text}`)
+    }
+    const prov = await opencode.client.config.providers().catch(() => null)
+    if (!prov?.data) return ctx.reply("Could not fetch providers.")
+    const providers: any[] = (prov.data as any).providers ?? []
+    if (!providers.length) return ctx.reply("No providers available.")
+    const cur = defaultModel ? `${defaultModel.providerID}/${defaultModel.modelID}` : "server default"
+    const rows = providers.map((p: any) => {
+      const keys = Object.keys(p.models || {})
+      if (!keys.length) return []
+      return [{ text: `🤖 ${p.name} (${keys.length})`, callback_data: `mp:${p.id}` }]
+    }).filter((r: any) => r.length)
+    const chunked: any[] = []
+    for (let i = 0; i < rows.length; i += 2) chunked.push(rows.slice(i, i + 2).flat())
+    await ctx.reply(`🤖 *Current:* ${cur}\n\nSelect a provider:`, {
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: chunked },
+    })
+  })
+
+  bot.command(["sessions", "s"], async (ctx) => {
+    const msg = ctx.message!
+    const text = msg.text.slice(msg.text.startsWith("/s") ? 9 : 4).trim()
+    if (text) {
+      chatToSession.delete(ctx.chat.id.toString())
+      chatToSession.set(ctx.chat.id.toString(), text)
+      saveStore()
+      return ctx.reply(`✅ Switched to session: ${text}`)
+    }
+    const list = await opencode.client.session.list({}).catch(() => null)
+    if (!list?.data) return ctx.reply("No sessions found.")
+    const all: any[] = list.data as any[]
+    const sid = sessionIdFor(ctx)
+    const rows = all.slice(0, 20).map((s: any) =>
+      [{ text: `${s.id === sid ? "👉 " : ""}${s.title || "untitled"} (${s.id.slice(0, 8)})`, callback_data: `ss:${s.id}` }],
+    )
+    const chunked: any[] = []
+    for (let i = 0; i < rows.length; i += 2) chunked.push(rows.slice(i, i + 2).flat())
+    await ctx.reply("📋 *Sessions* — tap to switch:", { parse_mode: "Markdown", reply_markup: { inline_keyboard: chunked } })
+  })
+
+  bot.command("undo", async (ctx) => {
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    await opencode.client.session.revert({ path: { id: sid } }).catch(() => {})
+    return ctx.reply("↩️ Undone last message.")
+  })
+
+  bot.command("compact", async (ctx) => {
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    await opencodeV2.v2.session.compact({ sessionID: sid }).catch(() => {})
+    return ctx.reply("📦 Session compacted.")
+  })
+
+  bot.command("rename", async (ctx) => {
+    const name = ctx.message!.text.slice("/rename".length).trim()
+    if (!name) return ctx.reply("Usage: /rename <new name>")
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    await opencode.client.session.update({ path: { id: sid }, body: { title: name } as any }).catch(() => {})
+    return ctx.reply(`✏️ Renamed to: ${name}`)
+  })
+
+  bot.command("fork", async (ctx) => {
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    const name = ctx.message!.text.slice("/fork".length).trim() || `Fork of ${sid.slice(0, 8)}`
+    const f = await opencode.client.session.fork({ path: { id: sid }, body: { title: name } as any }).catch(() => null)
+    if (!f?.data) return ctx.reply("⚠️ Fork failed.")
+    chatToSession.set(ctx.chat.id.toString(), (f.data as any).id)
+    saveStore()
+    return ctx.reply(`🔀 Forked. New session: ${(f.data as any).id}`)
+  })
+
+  bot.command("export", async (ctx) => {
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    const msgs = await opencode.client.session.messages({ path: { id: sid } }).catch(() => null)
+    if (!msgs?.data) return ctx.reply("No messages.")
+    const lines = (msgs.data as any[]).map((m: any) => `[${m.role}]\n${m.parts?.map((p: any) => p.text || "").join("\n") || ""}`)
+    const text = lines.join("\n\n").slice(0, TELEGRAM_MAX * 8)
+    await sendChunked(ctx, text || "(empty transcript)")
+  })
+
+  bot.command("copy", async (ctx) => {
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    const msgs = await opencode.client.session.messages({ path: { id: sid } }).catch(() => null)
+    if (!msgs?.data) return ctx.reply("No messages.")
+    const lines = (msgs.data as any[]).map((m: any) => `[${m.role}]\n${m.parts?.map((p: any) => p.text || "").join("\n") || ""}`)
+    await sendChunked(ctx, lines.join("\n\n").slice(0, TELEGRAM_MAX * 8))
+  })
+
+  bot.command("agents", async (ctx) => {
+    const list = await opencodeV2.v2.agent.list({}).catch(() => null)
+    const agents: any[] = (list?.data as any)?.data
+    if (!agents?.length) return ctx.reply("No agents available.")
+    const rows = agents.map((a: any) => `\`${a.id}\` — ${a.name || a.id}`)
+    return ctx.reply(`🧠 Agents:\n${rows.join("\n")}`)
+  })
+
+  bot.command("skills", async (ctx) => {
+    const list = await opencodeV2.v2.skill.list({}).catch(() => null)
+    const skills: any[] = (list?.data as any)?.data
+    if (!skills?.length) return ctx.reply("No skills available.")
+    const rows = skills.slice(0, 20).map((s: any) => `\`${s.id}\` — ${s.name || s.id}`)
+    return ctx.reply(`🛠 Skills:\n${rows.join("\n")}`)
+  })
+
+  bot.command("init", async (ctx) => {
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    await opencode.client.session.init({ path: { id: sid }, body: { directory: DIRECTORY } as any }).catch(() => {})
+    return ctx.reply("📝 Session initialized with AGENTS.md.")
+  })
+
+  bot.command("share", async (ctx) => {
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    const res = await opencode.client.session.share({ path: { id: sid } }).catch(() => null)
+    if (!res?.data) return ctx.reply("⚠️ Share failed.")
+    return ctx.reply(`🔗 Shared: ${(res.data as any).url || (res.data as any).id}`)
+  })
+
+  bot.command("review", async (ctx) => {
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    const diff = await opencode.client.session.diff({ path: { id: sid } }).catch(() => null)
+    if (!diff?.data) return ctx.reply("No changes to review.")
+    await sendChunked(ctx, (diff.data as any).diff || JSON.stringify(diff.data, null, 2).slice(0, TELEGRAM_MAX * 4))
+  })
+
+  bot.command("move", async (ctx) => {
+    const msg = ctx.message!
+    const dir = msg.text.slice("/move".length).trim()
+    if (dir) {
+      if (!fs.existsSync(dir)) return ctx.reply("⚠️ Directory does not exist.")
+      return await switchDir(ctx, dir)
+    }
+    const desk = path.join(os.homedir(), "OneDrive", "OneDrive - Bedroom Elegance", "Desktop")
+    let folders: string[] = []
+    try {
+      folders = fs.readdirSync(desk).filter((f) => {
+        const full = path.join(desk, f)
+        return fs.statSync(full).isDirectory()
+      })
+    } catch { /* best-effort */ }
+    // also add the current directory
+    if (!folders.includes(DIRECTORY)) folders.unshift(DIRECTORY)
+    const rows = folders.slice(0, 20).map((f: string) =>
+      [{ text: `${f === DIRECTORY ? "📍 " : ""}${path.basename(f)}`, callback_data: `mv:${f}` }],
+    )
+    const chunked: any[] = []
+    for (let i = 0; i < rows.length; i += 2) chunked.push(rows.slice(i, i + 2).flat())
+    await ctx.reply("📂 *Select a directory:*", { parse_mode: "Markdown", reply_markup: { inline_keyboard: chunked } })
+  })
+
+  async function switchDir(ctx: Context, dir: string) {
+    dir = path.resolve(dir)
+    if (!fs.existsSync(dir)) {
+      await ctx.reply("⚠️ Directory does not exist.").catch(() => {})
+      return
+    }
+    config.directory = dir
+    saveConfig(config)
+    DIRECTORY = dir
+    const cfgPath = path.join(dir, "opencode.jsonc")
+    if (!fs.existsSync(cfgPath)) {
+      fs.writeFileSync(cfgPath, JSON.stringify({
+        $schema: "https://opencode.ai/config.json",
+        permission: { external_directory: "allow", bash: "allow", read: "allow", write: "allow" },
+      }, null, 2))
+    }
+    server.close()
+    chatToSession.clear()
+    saveStore()
+    server = await bootServer(DIRECTORY)
+    opencode = { client: createOpencodeClient({ baseUrl: server.url }) }
+    opencodeV2 = createV2Client({ baseUrl: server.url })
+    startEvents()
+    try {
+      const prov = await opencode.client.config.providers()
+      const defaults = prov.data?.default as Record<string, string> | undefined
+      if (defaults) {
+        const preferred = Object.entries(defaults).find(([id]) => id === "opencode") ?? Object.entries(defaults)[0]
+        if (preferred) defaultModel = { providerID: preferred[0], modelID: preferred[1] }
+      }
+    } catch { /* ok */ }
+    await ctx.reply(`✅ Switched to \`${dir}\``, { parse_mode: "Markdown" }).catch(() => {})
+  }
+
+  bot.command("thinking", async (ctx) => {
+    const val = ctx.message!.text.slice("/thinking".length).trim()
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    if (val) {
+      await opencode.client.session.update({ path: { id: sid }, body: { thinking: val } as any }).catch(() => {})
+      return ctx.reply(`🧠 Thinking set to: ${val}`)
+    }
+    const s = await opencode.client.session.get({ path: { id: sid } }).catch(() => null)
+    const current = (s?.data as any)?.thinking || "default"
+    return ctx.reply(`🧠 Current thinking: ${current}\nUsage: /thinking on|off|auto`)
+  })
+
+  bot.command(["diff", "editor", "exit", "themes", "timeline", "timestamps", "stuntdouble", "connect", "mcps"], (ctx) =>
+    ctx.reply(`⚠️ \`/${ctx.message!.text.split(" ")[0].slice(1)}\` is a CLI-only command.`),
+  )
+
+  bot.command("help", (ctx) =>
+    ctx.reply(
+      "🎬 Commands:\n" +
+        "/new — fresh session\n/sessions — list or switch session\n/status — current session\n/stop — abort task\n" +
+        "/model — show or change model\n/undo — undo last\n/fork — fork session\n/rename — rename session\n" +
+        "/compact — compact session\n/export — export transcript\n/copy — copy transcript\n/agents — list agents\n" +
+        "/skills — list skills\n/init — init with AGENTS.md\n/share — share session\n/review — review changes\n" +
+        "/move — change project dir\n/thinking — toggle thinking\n/remote — connection status\n\nSend any text to work on your project.",
+    ),
+  )
+
+  // model picker: provider → model list
+  bot.callbackQuery(/^mp:(.+)/, async (ctx) => {
+    const pid = ctx.callbackQuery.data!.split(":")[1]
+    const prov = await opencode.client.config.providers().catch(() => null)
+    const providers: any[] = (prov?.data as any)?.providers ?? []
+    const p = providers.find((x: any) => x.id === pid)
+    if (!p) return ctx.answerCallbackQuery("Provider not found")
+    const keys = Object.keys(p.models || {})
+    const rows = keys.map((k: string) => {
+      const m = p.models[k]
+      return [{ text: `🧠 ${m.name || k}`, callback_data: `mm:${pid}:${k}` }]
+    })
+    const chunked: any[] = []
+    for (let i = 0; i < rows.length; i += 2) chunked.push(rows.slice(i, i + 2).flat())
+    await ctx.editMessageText(`🤖 *${p.name}* — Select a model:`, {
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: chunked },
+    })
+    await ctx.answerCallbackQuery()
+  })
+
+  // model picker: set model
+  bot.callbackQuery(/^mm:(.+):(.+)/, async (ctx) => {
+    const [_, pid, mid] = ctx.callbackQuery.data!.split(":")
+    const full = `${pid}/${mid}`
+    defaultModel = { providerID: pid, modelID: mid }
+    config.model = full
+    saveConfig(config)
+    await opencode.client.config.update({ body: { model: full } as any }).catch(() => {})
+    syncModelToFile(full)
+    await ctx.editMessageText(`✅ Model set to \`${full}\``, { parse_mode: "Markdown" })
+    await ctx.answerCallbackQuery()
+  })
+
+  // session picker: switch session
+  bot.callbackQuery(/^ss:(.+)/, async (ctx) => {
+    const sid = ctx.callbackQuery.data!.split(":")[1]
+    chatToSession.delete(ctx.chat!.id.toString())
+    chatToSession.set(ctx.chat!.id.toString(), sid)
+    saveStore()
+    const s = await opencode.client.session.get({ path: { id: sid } }).catch(() => null)
+    const title = (s?.data as any)?.title || sid
+    await ctx.editMessageText(`✅ Switched to *${title}*`, { parse_mode: "Markdown" })
+    await ctx.answerCallbackQuery()
+  })
+
+  // directory picker: switch directory
+  bot.callbackQuery(/^mv:(.+)/, async (ctx) => {
+    const d = ctx.callbackQuery.data!.slice(3)
+    await switchDir(ctx, d)
+    await ctx.answerCallbackQuery()
+  })
+
+  bot.command("remote", async (ctx) => {
+    const sid = sessionIdFor(ctx)
+    const s = sid ? await opencode.client.session.get({ path: { id: sid } }).catch(() => null) : null
+    const title = ((s?.data as any)?.title || "").replace(/[_*[\]()~`>#+\-=|{}.!]/g, "\\$&")
+    const m = defaultModel ? `${defaultModel.providerID}/${defaultModel.modelID}` : "server default"
+    const sessionLabel = sid ? `${title} (${sid.slice(0, 12)}…)` : "no active session"
+    await ctx.reply(
+      "✅ *You're connected to Telegram*\n" +
+      `📁 Directory: \`${DIRECTORY}\`\n` +
+      `🤖 Model: \`${m}\`\n` +
+      `📋 Session: ${sessionLabel}\n` +
+      `👤 User: \`${ctx.from!.id}\``,
+      { parse_mode: "Markdown" },
+    )
   })
 
   bot.on("message:text", async (ctx) => {
     const text = ctx.message.text
-    if (text.startsWith("/")) return // unknown command — ignore
+    if (text.startsWith("/")) return
     const chatId = ctx.chat.id.toString()
 
     const sessionId = await getOrCreateSession(chatId)
@@ -180,29 +550,91 @@ async function startBridge(config: RemoteConfig) {
     const status = await ctx.reply("🎬 working...")
     statusMessage.set(sessionId, { chatId: ctx.chat.id, messageId: status.message_id, lines: [] })
 
-    // No `model` in the body → the Hollywood router casts it per message.
+    await resolvePending(sessionId)
+
+    const promptBody: any = { parts: [{ type: "text", text }] }
+    if (defaultModel) promptBody.model = defaultModel
+
+    const poller = setInterval(() => { void resolvePending(sessionId) }, 3000)
     const result = await opencode.client.session
-      .prompt({ path: { id: sessionId }, body: { parts: [{ type: "text", text }] } })
+      .prompt({ path: { id: sessionId }, body: promptBody })
       .catch((err) => ({ error: err, data: undefined }))
+    clearInterval(poller)
+    await resolvePending(sessionId)
 
     statusMessage.delete(sessionId)
 
     if ((result as any).error || !result.data) {
       console.error("Prompt failed:", (result as any).error)
-      return ctx.reply("⚠️ Something went wrong handling that. Try again or /new.")
+      return ctx.reply("⚠️ Something went wrong. Try again or /new.")
     }
 
     const data = result.data as any
-    const reply =
-      data.parts
-        ?.filter((p: any) => p.type === "text")
-        .map((p: any) => p.text)
-        .join("\n")
-        .trim() || "(done — no text reply)"
+    const info = data.info as { modelID?: string; providerID?: string } | undefined
+    const parts = data.parts as Array<{ type: string; text?: string }> | undefined
 
-    const model = data.info?.modelID ? `🎬 ${data.info.modelID}` : "🎬 done"
-    await bot.api.editMessageText(ctx.chat.id, status.message_id, model).catch(() => {})
-    await sendChunked(ctx, reply)
+    const reply =
+      parts
+        ?.filter((p) => p.type === "text")
+        .map((p) => p.text || "")
+        .join("\n")
+        .trim() || ""
+
+    const modelLabel = info?.modelID ? `🎬 ${info.providerID}/${info.modelID}` : "🎬 done"
+
+    if (reply) {
+      await bot.api.editMessageText(ctx.chat.id, status.message_id, modelLabel).catch(() => {})
+      await sendChunked(ctx, reply)
+    } else {
+      // No text parts — show error info if available
+      const errorPart = parts?.find((p) => p.type === "retry")
+      const errorMsg = errorPart ? `⚠️ ${(errorPart as any).error?.data?.message || "Error"}` : "⚠️ No text response"
+      await bot.api.editMessageText(ctx.chat.id, status.message_id, `${modelLabel}\n${errorMsg}`).catch(() => {})
+    }
+  })
+
+  process.on("SIGINT", () => {
+    console.log("\nShutting down...")
+    cleanup()
+    process.exit(0)
+  })
+  process.on("SIGTERM", () => {
+    cleanup()
+    process.exit(0)
+  })
+
+  // Register commands menu with Telegram
+  try {
+    await bot.api.setMyCommands([
+      { command: "start", description: "Welcome message" },
+      { command: "new", description: "Fresh session" },
+      { command: "sessions", description: "List or switch session" },
+      { command: "status", description: "Current session info" },
+      { command: "stop", description: "Abort running task" },
+      { command: "model", description: "Show or change model" },
+      { command: "undo", description: "Undo last message" },
+      { command: "fork", description: "Fork current session" },
+      { command: "rename", description: "Rename session" },
+      { command: "compact", description: "Compact session" },
+      { command: "export", description: "Export transcript" },
+      { command: "copy", description: "Copy transcript" },
+      { command: "agents", description: "List agents" },
+      { command: "skills", description: "List skills" },
+      { command: "init", description: "Init with AGENTS.md" },
+      { command: "share", description: "Share session" },
+      { command: "review", description: "Review changes" },
+      { command: "move", description: "Change project dir" },
+      { command: "thinking", description: "Toggle thinking" },
+      { command: "remote", description: "Connection status" },
+      { command: "help", description: "Show all commands" },
+    ])
+    console.log("Commands menu registered")
+  } catch {
+    console.log("Could not register commands menu")
+  }
+
+  bot.catch((err) => {
+    console.error("Bot error (caught):", err.message)
   })
 
   bot.start({
@@ -211,4 +643,13 @@ async function startBridge(config: RemoteConfig) {
   })
 }
 
-await main()
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled rejection:", err)
+  cleanup()
+  process.exit(1)
+})
+
+const isMain = process.argv[1] && (process.argv[1].includes("index.ts") || process.argv[1].includes("hollycode-remote"))
+if (isMain) {
+  await main()
+}

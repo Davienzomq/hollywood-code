@@ -1,6 +1,3 @@
-// Hollywood Code — remote control config.
-// Saved once by the setup wizard so the user never juggles env vars again.
-// Location: ~/.config/hollywood/telegram.json (env vars still override, for CI).
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -9,6 +6,7 @@ export interface RemoteConfig {
   token: string
   allowedIds: string[]
   directory: string
+  model?: string
 }
 
 const DIR = path.join(os.homedir(), ".config", "hollywood")
@@ -18,8 +16,34 @@ export function configPath() {
   return FILE
 }
 
+function loadDotenv(directory?: string) {
+  const candidates = [
+    directory && path.join(directory, ".env"),
+    path.join(process.cwd(), ".env"),
+    path.join(os.homedir(), ".hollywood.env"),
+  ].filter(Boolean) as string[]
+
+  for (const file of candidates) {
+    try {
+      const content = fs.readFileSync(file, "utf8")
+      for (const line of content.split("\n")) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith("#")) continue
+        const eq = trimmed.indexOf("=")
+        if (eq === -1) continue
+        const key = trimmed.slice(0, eq).trim()
+        const val = trimmed.slice(eq + 1).trim()
+        if (!process.env[key]) process.env[key] = val
+      }
+    } catch {
+      // file doesn't exist or can't be read — skip
+    }
+  }
+}
+
 export function loadConfig(): RemoteConfig | undefined {
-  // Env wins (lets power users / CI bypass the wizard entirely).
+  loadDotenv()
+
   const envToken = process.env["HOLLYWOOD_TG_TOKEN"]
   if (envToken) {
     return {
@@ -29,11 +53,15 @@ export function loadConfig(): RemoteConfig | undefined {
         .map((s) => s.trim())
         .filter(Boolean),
       directory: process.env["HOLLYWOOD_TG_DIRECTORY"] || process.cwd(),
+      model: process.env["HOLLYWOOD_TG_MODEL"] || undefined,
     }
   }
   try {
     const cfg = JSON.parse(fs.readFileSync(FILE, "utf8")) as RemoteConfig
-    if (cfg.token) return cfg
+    if (cfg.token) {
+      if (!cfg.model && process.env["HOLLYWOOD_TG_MODEL"]) cfg.model = process.env["HOLLYWOOD_TG_MODEL"]
+      return cfg
+    }
   } catch {
     // no saved config yet
   }
@@ -42,5 +70,7 @@ export function loadConfig(): RemoteConfig | undefined {
 
 export function saveConfig(cfg: RemoteConfig) {
   fs.mkdirSync(DIR, { recursive: true })
-  fs.writeFileSync(FILE, JSON.stringify(cfg, null, 2))
+  const tmp = FILE + ".tmp"
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2))
+  fs.renameSync(tmp, FILE)
 }

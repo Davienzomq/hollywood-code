@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "type": "module",
   "license": "MIT",
+  "bin": {
+    "hollycode-remote": "./bin/hollycode-remote.ts"
+  },
   "scripts": {
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts",
