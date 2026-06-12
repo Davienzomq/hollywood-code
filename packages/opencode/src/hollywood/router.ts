@@ -33,6 +33,14 @@ const TIER_CANDIDATES: Record<string, Record<Tier, string[]>> = {
     mid: ["gemini-3-pro", "gemini-2.5-pro"],
     high: ["gemini-3-ultra", "gemini-ultra"],
   },
+  // opencode zen gateway: free tier ships flash/mini doubles and Big Pickle
+  // as the star; paid accounts may expose frontier models (validated live by
+  // the caller, unavailable names are skipped in order).
+  opencode: {
+    low: ["claude-haiku-4-5", "deepseek-v4-flash-free", "north-mini-code-free", "mimo-v2.5-free"],
+    mid: ["claude-sonnet-4-6", "big-pickle", "qwen3-coder", "deepseek-v4-flash-free"],
+    high: ["claude-fable-5", "gpt-5.5", "claude-opus-4-8", "big-pickle", "nemotron-3-ultra-free"],
+  },
 }
 
 export function isEnabled(): boolean {
