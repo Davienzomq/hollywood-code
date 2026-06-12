@@ -82,6 +82,9 @@ import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
+import { spawn } from "node:child_process"
+import { fileURLToPath } from "node:url"
+import { existsSync } from "node:fs"
 
 const appGlobalBindingCommands = [
   "session.list",
@@ -753,6 +756,58 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           dialog.replace(() => <DialogStatus />)
         },
         category: "System",
+      },
+      {
+        name: "remote.control",
+        title: "Remote control (Telegram)",
+        slashName: "remote-control",
+        slashAliases: ["remote", "telegram"],
+        category: "System",
+        run: () => {
+          // The setup wizard is interactive (paste token, pair phone), so it
+          // runs in its OWN terminal window — the bridge must outlive the TUI.
+          const dir = project.instance.directory() || process.cwd()
+          const binTs = fileURLToPath(new URL("../../telegram/bin/hollycode-remote.ts", import.meta.url))
+          // --directory is explicit: with a saved config the launcher would
+          // otherwise reuse the previously configured project folder.
+          const launcher =
+            (existsSync(binTs) ? `"${process.execPath}" run "${binTs}"` : "hollycode-remote") + ` --directory "${dir}"`
+          try {
+            if (process.platform === "win32") {
+              // cmd strips the first+last quote of the /k argument when it contains
+              // several quoted paths — the extra outer quotes absorb that.
+              const child = spawn(
+                "cmd.exe",
+                ["/c", `start "Hollywood Remote Control" /D "${dir}" cmd /k "${launcher}"`],
+                {
+                  detached: true,
+                  stdio: "ignore",
+                  windowsVerbatimArguments: true,
+                },
+              )
+              child.unref()
+            } else if (process.platform === "darwin") {
+              const script = `tell application "Terminal"\nactivate\ndo script "cd ${JSON.stringify(dir)} && ${launcher.replaceAll('"', '\\"')}"\nend tell`
+              const child = spawn("osascript", ["-e", script], { detached: true, stdio: "ignore" })
+              child.unref()
+            } else {
+              const sh = `cd ${JSON.stringify(dir)} && ${launcher}`
+              const child = spawn(
+                "sh",
+                ["-c", `(x-terminal-emulator -e sh -c '${sh}' || gnome-terminal -- sh -c '${sh}' || konsole -e sh -c '${sh}' || xterm -e sh -c '${sh}') >/dev/null 2>&1 &`],
+                { detached: true, stdio: "ignore" },
+              )
+              child.unref()
+            }
+            toast.show({
+              message: "Telegram setup opened in a new terminal window — follow the steps there",
+              variant: "success",
+            })
+          } catch {
+            toast.show({ message: "Could not open a terminal — run `hollycode-remote` manually", variant: "error" })
+          }
+          dialog.clear()
+        },
       },
       {
         name: "theme.switch",

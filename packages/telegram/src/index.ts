@@ -76,6 +76,34 @@ export async function startBridge(config: RemoteConfig) {
   const ALLOWED = new Set(config.allowedIds)
   let DIRECTORY = config.directory || process.cwd()
 
+  // Single instance: two bots polling the same token = Telegram 409 conflicts.
+  // Take over from any previous instance (kill its bot + spawned server).
+  const PIDFILE = path.join(os.homedir(), ".config", "hollywood", "telegram.pid")
+  try {
+    const old = JSON.parse(fs.readFileSync(PIDFILE, "utf8")) as { bot?: number; server?: number }
+    for (const pid of [old.bot, old.server]) {
+      if (pid && pid !== process.pid) {
+        try {
+          process.kill(pid)
+          console.log("Stopped previous instance (pid", pid + ")")
+        } catch {
+          // already gone
+        }
+      }
+    }
+    await new Promise((r) => setTimeout(r, 1500))
+  } catch {
+    // no previous instance
+  }
+  const writePidfile = () => {
+    try {
+      fs.mkdirSync(path.dirname(PIDFILE), { recursive: true })
+      fs.writeFileSync(PIDFILE, JSON.stringify({ bot: process.pid, server: serverProc?.pid }))
+    } catch {
+      // best-effort
+    }
+  }
+
   const STORE = path.join(os.homedir(), ".hollywood-telegram-sessions.json")
   const chatToSession = new Map<string, string>()
   try {
@@ -101,12 +129,12 @@ export async function startBridge(config: RemoteConfig) {
     autoAllow
       ? { external_directory: "allow", bash: "allow", read: "allow", write: "allow", edit: "allow", webfetch: "allow" }
       : { external_directory: "ask", bash: "ask", read: "allow", write: "ask", edit: "ask", webfetch: "allow" }
+  // Editors/PowerShell often write a UTF-8 BOM that JSON.parse chokes on — strip it.
+  const readJsonc = (p: string) => JSON.parse(fs.readFileSync(p, "utf8").replace(/^﻿/, "")) as any
   const applyPermissionMode = () => {
     try {
       const p = path.join(DIRECTORY, "opencode.jsonc")
-      const raw = fs.existsSync(p)
-        ? (JSON.parse(fs.readFileSync(p, "utf8")) as any)
-        : { $schema: "https://opencode.ai/config.json" }
+      const raw = fs.existsSync(p) ? readJsonc(p) : { $schema: "https://opencode.ai/config.json" }
       raw.permission = permissionBlock()
       fs.writeFileSync(p, JSON.stringify(raw, null, 2))
       console.log(`Permission mode: ${autoAllow ? "auto-allow" : "ask via Telegram"}`)
@@ -187,7 +215,7 @@ export async function startBridge(config: RemoteConfig) {
   const syncModelToFile = (model: string) => {
     try {
       const p = path.join(DIRECTORY, "opencode.jsonc")
-      const raw = JSON.parse(fs.readFileSync(p, "utf8")) as any
+      const raw = readJsonc(p)
       raw.model = model
       fs.writeFileSync(p, JSON.stringify(raw, null, 2))
     } catch { /* best-effort */ }
