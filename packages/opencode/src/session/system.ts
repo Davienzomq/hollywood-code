@@ -21,8 +21,15 @@ import { Location } from "@opencode-ai/core/location"
 import { LocationServiceMap } from "@opencode-ai/core/location-layer"
 import { PluginBoot } from "@opencode-ai/core/plugin/boot"
 import { Reference } from "@opencode-ai/core/reference"
+import { brandPrompts } from "@/hollywood/identity"
 
 export function provider(model: Provider.Model) {
+  // Hollywood Code: re-brand the upstream prompt at runtime (identity + links)
+  // so the agent is Hollycode, not opencode. See @/hollywood/identity.
+  return brandPrompts(providerBase(model))
+}
+
+function providerBase(model: Provider.Model) {
   if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
     return [PROMPT_BEAST]
   if (model.api.id.includes("gpt")) {
