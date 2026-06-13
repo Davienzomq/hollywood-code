@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Hollycode installer (macOS / Linux) — downloads a tarball, no git required.
-#   curl -fsSL https://raw.githubusercontent.com/Davienzomq/hollywood-code/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Davienzomq/hollywood-code/dev/install.sh | bash
 #
 # Installs Bun if missing, downloads the repo to ~/.hollycode, runs `bun install`,
 # and drops `hollycode` + `hollycode-remote` launchers into ~/.bun/bin.
@@ -9,7 +9,7 @@ set -euo pipefail
 YELLOW='\033[0;33m'; GREEN='\033[0;32m'; GRAY='\033[0;2m'; NC='\033[0m'
 step() { echo -e "${YELLOW}🎬 $1${NC}"; }
 
-TARBALL="https://github.com/Davienzomq/hollywood-code/archive/refs/heads/main.tar.gz"
+TARBALL="https://github.com/Davienzomq/hollywood-code/archive/refs/heads/dev.tar.gz"
 DEST="$HOME/.hollycode"
 BUN_BIN="$HOME/.bun/bin"
 BUN="$BUN_BIN/bun"
@@ -30,7 +30,7 @@ curl -fsSL "$TARBALL" -o "$tmp/repo.tar.gz"
 step "Extracting to $DEST..."
 tar -xzf "$tmp/repo.tar.gz" -C "$tmp"
 rm -rf "$DEST"
-mv "$tmp/hollywood-code-main" "$DEST"
+mv "$tmp/hollywood-code-dev" "$DEST"
 
 # 3. Dependencies
 step "Installing dependencies (this can take a minute)..."
