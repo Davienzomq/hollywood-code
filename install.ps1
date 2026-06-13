@@ -1,7 +1,7 @@
-# Hollycode installer (Windows) — clone-based, works without prebuilt binaries.
+# Hollycode installer (Windows) — downloads a ZIP, no git required.
 #   irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/main/install.ps1 | iex
 #
-# Installs Bun if missing, clones the repo to %USERPROFILE%\.hollycode,
+# Installs Bun if missing, downloads the repo to %USERPROFILE%\.hollycode,
 # runs `bun install`, and drops `hollycode` + `hollycode-remote` launchers
 # into Bun's bin dir (already on PATH).
 
@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 function Write-Step($msg) { Write-Host "🎬 $msg" -ForegroundColor Yellow }
 function Write-Ok($msg)   { Write-Host "   $msg" -ForegroundColor DarkGray }
 
-$REPO    = "https://github.com/Davienzomq/hollywood-code"
+$ZIP     = "https://github.com/Davienzomq/hollywood-code/archive/refs/heads/main.zip"
 $DEST    = Join-Path $env:USERPROFILE ".hollycode"
 $BUN_BIN = Join-Path $env:USERPROFILE ".bun\bin"
 $BUN_EXE = Join-Path $BUN_BIN "bun.exe"
@@ -23,27 +23,27 @@ if (-not (Test-Path $BUN_EXE)) {
     Write-Ok "Bun already installed."
 }
 
-# 2. Git
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    throw "git is required. Install it from https://git-scm.com/download/win and re-run."
+# 2. Download + extract (replaces any previous install)
+Write-Step "Downloading Hollycode..."
+$tmp = Join-Path $env:TEMP ("hollycode-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force $tmp | Out-Null
+try {
+    Invoke-WebRequest -Uri $ZIP -OutFile (Join-Path $tmp "repo.zip") -UseBasicParsing
+    Write-Step "Extracting to $DEST..."
+    Expand-Archive -Path (Join-Path $tmp "repo.zip") -DestinationPath $tmp -Force
+    if (Test-Path $DEST) { Remove-Item -Recurse -Force $DEST }
+    Move-Item (Join-Path $tmp "hollywood-code-main") $DEST
+} finally {
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
-# 3. Clone or update
-if (Test-Path (Join-Path $DEST ".git")) {
-    Write-Step "Updating existing install at $DEST..."
-    git -C $DEST pull --ff-only
-} else {
-    Write-Step "Cloning Hollycode to $DEST..."
-    git clone --depth 1 $REPO $DEST
-}
-
-# 4. Dependencies
+# 3. Dependencies
 Write-Step "Installing dependencies (this can take a minute)..."
 Push-Location $DEST
 & $BUN_EXE install
 Pop-Location
 
-# 5. Launchers on PATH
+# 4. Launchers on PATH
 Write-Step "Creating launchers in $BUN_BIN..."
 New-Item -ItemType Directory -Force -Path $BUN_BIN | Out-Null
 

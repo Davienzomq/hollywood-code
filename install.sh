@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Hollycode installer (macOS / Linux) — clone-based, works without prebuilt binaries.
+# Hollycode installer (macOS / Linux) — downloads a tarball, no git required.
 #   curl -fsSL https://raw.githubusercontent.com/Davienzomq/hollywood-code/main/install.sh | bash
 #
-# Installs Bun if missing, clones the repo to ~/.hollycode, runs `bun install`,
+# Installs Bun if missing, downloads the repo to ~/.hollycode, runs `bun install`,
 # and drops `hollycode` + `hollycode-remote` launchers into ~/.bun/bin.
 set -euo pipefail
 
 YELLOW='\033[0;33m'; GREEN='\033[0;32m'; GRAY='\033[0;2m'; NC='\033[0m'
 step() { echo -e "${YELLOW}🎬 $1${NC}"; }
 
-REPO="https://github.com/Davienzomq/hollywood-code"
+TARBALL="https://github.com/Davienzomq/hollywood-code/archive/refs/heads/main.tar.gz"
 DEST="$HOME/.hollycode"
 BUN_BIN="$HOME/.bun/bin"
 BUN="$BUN_BIN/bun"
@@ -21,23 +21,22 @@ if [ ! -x "$BUN" ] && ! command -v bun >/dev/null 2>&1; then
 fi
 [ -x "$BUN" ] || BUN="$(command -v bun)"
 
-# 2. Git
-command -v git >/dev/null 2>&1 || { echo "git is required. Install it and re-run."; exit 1; }
+# 2. Download + extract (replaces any previous install)
+command -v tar >/dev/null 2>&1 || { echo "tar is required."; exit 1; }
+step "Downloading Hollycode..."
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL "$TARBALL" -o "$tmp/repo.tar.gz"
+step "Extracting to $DEST..."
+tar -xzf "$tmp/repo.tar.gz" -C "$tmp"
+rm -rf "$DEST"
+mv "$tmp/hollywood-code-main" "$DEST"
 
-# 3. Clone or update
-if [ -d "$DEST/.git" ]; then
-  step "Updating existing install at $DEST..."
-  git -C "$DEST" pull --ff-only
-else
-  step "Cloning Hollycode to $DEST..."
-  git clone --depth 1 "$REPO" "$DEST"
-fi
-
-# 4. Dependencies
+# 3. Dependencies
 step "Installing dependencies (this can take a minute)..."
 (cd "$DEST" && "$BUN" install)
 
-# 5. Launchers
+# 4. Launchers
 step "Creating launchers in $BUN_BIN..."
 mkdir -p "$BUN_BIN"
 
