@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hollycode — The open source AI coding agent</title>
+  <meta name="description" content="Open-source AI coding agent with a built-in cost router: cheap chat goes to stunt doubles, hard tasks to the star. Free models included, or connect Claude, GPT, Gemini and 75+ providers.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0c0c0d;
+      --bg-soft: #121214;
+      --text: #ededed;
+      --muted: #8a8a8a;
+      --faint: #5c5c5c;
+      --border: rgba(255,255,255,0.08);
+      --gold: #e0b341;
+      --gold-soft: rgba(224,179,65,0.12);
+      --mono: 'JetBrains Mono','SF Mono','Fira Code',monospace;
+    }
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; text-decoration: none; }
+    .container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+    .gold { color: var(--gold); }
+
+    /* ── Nav ── */
+    nav {
+      position: sticky; top: 0; z-index: 50;
+      backdrop-filter: blur(14px); background: rgba(12,12,13,0.7);
+      border-bottom: 1px solid var(--border);
+    }
+    nav .inner { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+    nav .logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 17px; letter-spacing: -0.01em; font-family: var(--mono); }
+    nav .nav-links { display: flex; gap: 26px; font-size: 14px; color: var(--muted); }
+    nav .nav-links a:hover { color: var(--text); }
+    nav .nav-right { display: flex; gap: 14px; align-items: center; font-size: 14px; }
+    nav .nav-right a { color: var(--muted); }
+    nav .nav-right a:hover { color: var(--text); }
+    .badge-new { background: var(--gold-soft); color: var(--gold); font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 20px; letter-spacing: 0.3px; }
+
+    /* ── Hero ── */
+    .hero { text-align: center; padding: 90px 0 0; }
+    .hero h1 { font-size: clamp(38px, 6vw, 62px); font-weight: 700; line-height: 1.08; letter-spacing: -0.03em; }
+    .hero h1 .gold { background: linear-gradient(120deg, var(--gold), #f3d27e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .hero .sub { font-size: 19px; color: var(--muted); max-width: 600px; margin: 22px auto 0; }
+
+    /* ── Install ── */
+    .install { margin-top: 36px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+    .install-tabs { display: inline-flex; gap: 4px; }
+    .install-tabs button {
+      background: none; border: none; color: var(--faint); font-family: inherit;
+      font-size: 13px; font-weight: 500; padding: 5px 12px; border-radius: 6px; cursor: pointer; transition: .15s;
+    }
+    .install-tabs button:hover { color: var(--muted); }
+    .install-tabs button.active { color: var(--gold); background: var(--gold-soft); }
+    .install-box {
+      display: inline-flex; align-items: center; gap: 16px;
+      background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px;
+      padding: 12px 16px; font-family: var(--mono); font-size: 14px;
+    }
+    .install-box .cmd { color: var(--muted); white-space: nowrap; overflow-x: auto; }
+    .install-box .cmd .p { color: var(--gold); user-select: none; }
+    .install-box .copy { background: rgba(255,255,255,0.06); border: none; color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; transition: .15s; flex-shrink: 0; }
+    .install-box .copy:hover { background: rgba(255,255,255,0.12); color: var(--text); }
+
+    /* ── Terminal demo ── */
+    .demo-wrap { margin: 60px auto 0; max-width: 920px; padding: 0 24px; }
+    .terminal {
+      border-radius: 12px; overflow: hidden; border: 1px solid var(--border);
+      box-shadow: 0 0 80px rgba(224,179,65,0.08), 0 40px 80px rgba(0,0,0,0.5);
+      background: #16181d;
+    }
+    .terminal img { display: block; width: 100%; height: auto; }
+    .demo-caption { text-align: center; color: var(--faint); font-size: 13px; margin-top: 16px; font-family: var(--mono); }
+
+    /* ── Section ── */
+    .section { padding: 110px 0; }
+    .section-tight { padding: 70px 0; }
+    .eyebrow { color: var(--gold); font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; font-family: var(--mono); }
+    .section h2 { font-size: clamp(30px, 4vw, 42px); font-weight: 700; letter-spacing: -0.02em; margin-top: 10px; line-height: 1.15; }
+    .section .lead { color: var(--muted); font-size: 18px; max-width: 580px; margin-top: 14px; }
+    .center { text-align: center; }
+    .center .lead { margin-left: auto; margin-right: auto; }
+
+    /* ── Why (split rows) ── */
+    .why-row { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; padding: 56px 0; border-top: 1px solid var(--border); }
+    .why-row:nth-child(even) .why-text { order: 2; }
+    .why-text h3 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 12px; }
+    .why-text p { color: var(--muted); font-size: 16px; }
+    .why-visual {
+      background: var(--bg-soft); border: 1px solid var(--border); border-radius: 12px;
+      padding: 24px; font-family: var(--mono); font-size: 13.5px; line-height: 1.9;
+    }
+    .why-visual .line { display: flex; justify-content: space-between; gap: 12px; }
+    .why-visual .you { color: var(--muted); }
+    .why-visual .tag-low { color: #6fce8f; }
+    .why-visual .tag-high { color: var(--gold); }
+    .why-visual .divider { border-top: 1px dashed var(--border); margin: 10px 0; }
+    .chip { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 6px; }
+    .chip-gold { background: var(--gold-soft); color: var(--gold); }
+
+    /* ── Features checklist ── */
+    .features { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 48px; max-width: 820px; margin: 48px auto 0; }
+    .feat { display: flex; gap: 14px; align-items: flex-start; }
+    .feat .check { color: var(--gold); font-size: 15px; margin-top: 3px; flex-shrink: 0; }
+    .feat h4 { font-size: 16px; font-weight: 600; }
+    .feat p { font-size: 14px; color: var(--muted); }
+
+    /* ── Stats ── */
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px; max-width: 760px; margin: 0 auto; text-align: center; }
+    .stat .n { font-size: 46px; font-weight: 800; letter-spacing: -0.03em; color: var(--gold); }
+    .stat .l { color: var(--muted); font-size: 15px; margin-top: 4px; }
+
+    /* ── FAQ ── */
+    .faq { max-width: 760px; margin: 40px auto 0; }
+    .faq-item { border-bottom: 1px solid var(--border); }
+    .faq-q { display: flex; justify-content: space-between; align-items: center; padding: 20px 0; font-size: 16px; font-weight: 500; cursor: pointer; user-select: none; }
+    .faq-q .arrow { color: var(--faint); transition: .2s; }
+    .faq-q.open .arrow { transform: rotate(180deg); color: var(--gold); }
+    .faq-a { font-size: 15px; color: var(--muted); line-height: 1.7; max-height: 0; overflow: hidden; transition: max-height .3s, padding .3s; }
+    .faq-a.open { max-height: 320px; padding-bottom: 20px; }
+    .faq-a code { font-family: var(--mono); background: rgba(255,255,255,0.07); padding: 1px 6px; border-radius: 4px; font-size: 13px; color: var(--gold); }
+
+    /* ── CTA banner ── */
+    .cta {
+      background: linear-gradient(135deg, rgba(224,179,65,0.1), rgba(224,179,65,0.02));
+      border: 1px solid rgba(224,179,65,0.15); border-radius: 18px; padding: 56px; text-align: center;
+    }
+    .cta h2 { font-size: 32px; font-weight: 700; letter-spacing: -0.02em; }
+    .cta p { color: var(--muted); margin: 12px auto 28px; max-width: 460px; }
+
+    /* ── Buttons ── */
+    .btn-primary { background: var(--gold); color: #0c0c0d; padding: 13px 28px; border-radius: 9px; font-size: 15px; font-weight: 600; display: inline-block; transition: .15s; }
+    .btn-primary:hover { background: #f0c860; }
+    .btn-ghost { border: 1px solid var(--border); padding: 13px 28px; border-radius: 9px; font-size: 15px; font-weight: 500; display: inline-block; transition: .15s; }
+    .btn-ghost:hover { border-color: rgba(255,255,255,0.3); }
+    .hero-cta { display: flex; gap: 12px; justify-content: center; margin-top: 30px; }
+
+    /* ── Footer ── */
+    footer { border-top: 1px solid var(--border); padding: 56px 0 40px; }
+    .footer-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 40px; margin-bottom: 40px; }
+    .footer-brand .logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-family: var(--mono); font-size: 16px; }
+    .footer-brand p { color: var(--muted); font-size: 14px; max-width: 280px; margin-top: 12px; }
+    .footer-col h5 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); margin-bottom: 16px; }
+    .footer-col a { display: block; font-size: 14px; color: var(--muted); margin-bottom: 11px; }
+    .footer-col a:hover { color: var(--text); }
+    .footer-bottom { display: flex; justify-content: space-between; padding-top: 24px; border-top: 1px solid var(--border); font-size: 13px; color: var(--faint); }
+
+    @media (max-width: 760px) {
+      nav .nav-links { display: none; }
+      .why-row { grid-template-columns: 1fr; gap: 24px; padding: 40px 0; }
+      .why-row:nth-child(even) .why-text { order: 0; }
+      .features { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: 1fr; gap: 28px; }
+      .footer-grid { grid-template-columns: 1fr 1fr; }
+      .hero { padding: 56px 0 0; }
+      .cta { padding: 40px 24px; }
+      .install-box { font-size: 12px; max-width: 90vw; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Nav ── -->
+<nav>
+  <div class="container inner">
+    <div class="logo">🎬 holly<span class="gold">code</span></div>
+    <div class="nav-links">
+      <a href="https://github.com/Davienzomq/hollywood-code">GitHub</a>
+      <a href="#features">Features</a>
+      <a href="#router">Router</a>
+      <a href="#faq">FAQ</a>
+    </div>
+    <div class="nav-right">
+      <span class="badge-new">Open Source</span>
+      <a href="#install">Download</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ── Hero ── -->
+<section class="hero">
+  <div class="container">
+    <h1>The open source<br>AI coding agent that <span class="gold">casts the right model</span></h1>
+    <p class="sub">Free models included, or connect Claude, GPT, Gemini and 75+ providers. Hollycode scores every message and casts it automatically — cheap chat to stunt doubles, hard tasks to the star.</p>
+    <div class="install" id="install">
+      <div class="install-tabs">
+        <button class="active" data-cmd='<span class="p">PS&gt;</span> irm hollycode.dev/install.ps1 | iex' data-copy="irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/main/install.ps1 | iex">Windows</button>
+        <button data-cmd='<span class="p">$</span> curl -fsSL hollycode.dev/install | bash' data-copy="curl -fsSL https://raw.githubusercontent.com/Davienzomq/hollywood-code/main/install.sh | bash">macOS / Linux</button>
+        <button data-cmd='<span class="p">$</span> git clone github.com/Davienzomq/hollywood-code' data-copy="git clone https://github.com/Davienzomq/hollywood-code && cd hollywood-code && bun install">git</button>
+      </div>
+      <div class="install-box">
+        <span class="cmd"><span class="p">PS&gt;</span> irm hollycode.dev/install.ps1 | iex</span>
+        <button class="copy" onclick="copyCmd(this)">Copy</button>
+      </div>
+    </div>
+  </div>
+  <!-- Terminal demo -->
+  <div class="demo-wrap">
+    <div class="terminal">
+      <img src="demo.gif" alt="Hollycode in action — the router casting models per task" loading="lazy">
+    </div>
+    <p class="demo-caption">// the router casts each message — doubles for cheap scenes, the star for the hard ones</p>
+  </div>
+</section>
+
+<!-- ── Why / Router (split rows) ── -->
+<section class="section" id="router">
+  <div class="container center" style="margin-bottom: 20px;">
+    <span class="eyebrow">Why Hollycode</span>
+    <h2>The casting director for your models</h2>
+    <p class="lead">A fork of opencode with a stuntdouble cost router built into the harness — plus things no other coding agent ships.</p>
+  </div>
+  <div class="container">
+
+    <div class="why-row">
+      <div class="why-text">
+        <h3>🎬 Automatic model casting</h3>
+        <p>Every message is scored on complexity, context, quality and speed — then cast to the right model of your provider. No config, no manual switching. Pin a model anytime, or type <code style="font-family:var(--mono);color:var(--gold)">/model auto</code> to hand the wheel back.</p>
+      </div>
+      <div class="why-visual">
+        <div class="line"><span class="you">› oi</span> <span class="tag-low">→ deepseek-flash 🤸</span></div>
+        <div class="line"><span class="you">› fix this typo</span> <span class="tag-low">→ haiku 🤸</span></div>
+        <div class="divider"></div>
+        <div class="line"><span class="you">› design the auth system</span> <span class="tag-high">→ big-pickle ⭐</span></div>
+        <div class="line"><span class="you">› refactor for production</span> <span class="tag-high">→ the star ⭐</span></div>
+      </div>
+    </div>
+
+    <div class="why-row">
+      <div class="why-text">
+        <h3>📱 Remote control from your phone</h3>
+        <p>One command — <code style="font-family:var(--mono);color:var(--gold)">/remote-control</code> — pairs your phone over Telegram. Send tasks from anywhere, approve permissions with Allow / Deny buttons, and the bot keeps running even after you close every window.</p>
+      </div>
+      <div class="why-visual">
+        <div class="line"><span class="you">You</span> <span>create a login page</span></div>
+        <div class="divider"></div>
+        <div class="line"><span class="tag-gold gold">🔐 Permission</span> <span class="you">write index.html</span></div>
+        <div class="line"><span>[ ✅ Allow ]</span> <span>[ ♾️ Always ]</span> <span>[ ❌ Deny ]</span></div>
+      </div>
+    </div>
+
+    <div class="why-row">
+      <div class="why-text">
+        <h3>💰 See exactly what you saved</h3>
+        <p>Run <code style="font-family:var(--mono);color:var(--gold)">/cost</code> any time for a per-model breakdown and how much the stunt doubles saved you versus running the star on everything.</p>
+      </div>
+      <div class="why-visual">
+        <div class="line"><span>🤸 deepseek-flash</span> <span class="you">5 scenes</span></div>
+        <div class="line"><span>⭐ big-pickle</span> <span class="you">2 scenes</span></div>
+        <div class="divider"></div>
+        <div class="line"><span class="you">All-star cost</span> <span>$1.84</span></div>
+        <div class="line"><span class="gold">Saved by doubles</span> <span class="gold">$0.71 (39%)</span></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ── Features checklist ── -->
+<section class="section-tight" id="features">
+  <div class="container center">
+    <span class="eyebrow">Everything opencode does, too</span>
+    <h2>Built on a proven agent</h2>
+  </div>
+  <div class="container">
+    <div class="features">
+      <div class="feat"><span class="check">✓</span><div><h4>LSP enabled</h4><p>Loads the right language servers for the model.</p></div></div>
+      <div class="feat"><span class="check">✓</span><div><h4>Multi-session</h4><p>Run multiple agents in parallel on one project.</p></div></div>
+      <div class="feat"><span class="check">✓</span><div><h4>Share links</h4><p>Share any session for reference or debugging.</p></div></div>
+      <div class="feat"><span class="check">✓</span><div><h4>GitHub Copilot</h4><p>Log in with GitHub to use your Copilot account.</p></div></div>
+      <div class="feat"><span class="check">✓</span><div><h4>ChatGPT Plus/Pro</h4><p>Log in with OpenAI to use your ChatGPT plan.</p></div></div>
+      <div class="feat"><span class="check">✓</span><div><h4>75+ providers</h4><p>Any model through Models.dev, including local ones.</p></div></div>
+      <div class="feat"><span class="check">✓</span><div><h4>Any editor</h4><p>Terminal, desktop app, and IDE extension.</p></div></div>
+      <div class="feat"><span class="check">✓</span><div><h4>Free models included</h4><p>Start coding immediately — no API key required.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Stats ── -->
+<section class="section-tight">
+  <div class="container">
+    <div class="stats">
+      <div class="stat"><div class="n">~40%</div><div class="l">Typical cost saved by doubles</div></div>
+      <div class="stat"><div class="n">75+</div><div class="l">Model providers supported</div></div>
+      <div class="stat"><div class="n">MIT</div><div class="l">Free &amp; open source</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── FAQ ── -->
+<section class="section" id="faq">
+  <div class="container center"><span class="eyebrow">Questions</span><h2>FAQ</h2></div>
+  <div class="container">
+    <div class="faq">
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)"><span>What is Hollycode?</span><span class="arrow">▾</span></div>
+        <div class="faq-a">An open-source AI coding agent — a fork of opencode — that adds a stuntdouble cost router and Telegram remote control. It runs in your terminal, desktop, or IDE and connects to any LLM provider.</div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)"><span>How does the model router work?</span><span class="arrow">▾</span></div>
+        <div class="faq-a">Every message is scored automatically. Simple chat is cast to a cheap stunt-double model; complex or production work is cast to the strongest star model your provider offers. Pin a model manually, or type <code>/model auto</code> to re-enable routing.</div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)"><span>Do I need a paid AI subscription?</span><span class="arrow">▾</span></div>
+        <div class="faq-a">No. Hollycode comes with free models included. You can also connect your own subscriptions to Claude, GPT, Gemini, and more.</div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)"><span>How do I control it from my phone?</span><span class="arrow">▾</span></div>
+        <div class="faq-a">Run <code>/remote-control</code> inside Hollycode. A short wizard pairs your Telegram account. After that you send tasks from your phone, approve permissions with buttons, and the bot keeps running after you close the terminal.</div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)"><span>Is it open source?</span><span class="arrow">▾</span></div>
+        <div class="faq-a">Yes — Hollycode is open source under the MIT license, same as opencode. Contributions welcome on <a href="https://github.com/Davienzomq/hollywood-code" class="gold">GitHub</a>.</div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)"><span>How is this different from opencode?</span><span class="arrow">▾</span></div>
+        <div class="faq-a">Hollycode adds the stuntdouble router (automatic per-message model selection), orchestration of parallel subagents, a <code>/cost</code> savings report, and full Telegram remote control — all native to the harness.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── CTA ── -->
+<section class="section-tight">
+  <div class="container">
+    <div class="cta">
+      <h2>Stop overpaying for simple tasks</h2>
+      <p>Install Hollycode and let the router do the casting.</p>
+      <div class="hero-cta">
+        <a href="#install" class="btn-primary">Get Started</a>
+        <a href="https://github.com/Davienzomq/hollywood-code" class="btn-ghost">⭐ Star on GitHub</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Footer ── -->
+<footer>
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <div class="logo">🎬 holly<span class="gold">code</span></div>
+        <p>The AI coding agent that casts the right model for every scene. A community fork of opencode.</p>
+      </div>
+      <div class="footer-col">
+        <h5>Product</h5>
+        <a href="https://github.com/Davienzomq/hollywood-code">GitHub</a>
+        <a href="https://github.com/Davienzomq/hollywood-code#readme">Docs</a>
+        <a href="https://github.com/Davienzomq/hollywood-code/releases">Releases</a>
+        <a href="#install">Install</a>
+      </div>
+      <div class="footer-col">
+        <h5>Community</h5>
+        <a href="https://github.com/Davienzomq/hollywood-code/issues">Issues</a>
+        <a href="https://github.com/Davienzomq/hollywood-code/discussions">Discussions</a>
+      </div>
+      <div class="footer-col">
+        <h5>Built on</h5>
+        <a href="https://opencode.ai">opencode</a>
+        <a href="https://github.com/Davienzomq/stuntdouble">stuntdouble</a>
+        <a href="https://bun.sh">Bun</a>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>©2026 Hollycode — MIT licensed · forked from opencode</span>
+      <span>Made with 🎬</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+  function toggleFaq(el) { el.classList.toggle('open'); el.nextElementSibling.classList.toggle('open'); }
+  function copyCmd(btn) {
+    const active = document.querySelector('.install-tabs .active');
+    const text = active ? active.dataset.copy : btn.parentElement.querySelector('.cmd').textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = 'Copy', 2000);
+    });
+  }
+  document.querySelectorAll('.install-tabs button').forEach(b => {
+    b.addEventListener('click', function() {
+      document.querySelector('.install-tabs .active').classList.remove('active');
+      this.classList.add('active');
+      document.querySelector('.install-box .cmd').innerHTML = this.dataset.cmd;
+    });
+  });
+</script>
+
+</body>
+</html>

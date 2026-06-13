@@ -434,6 +434,87 @@ export async function startBridge(config: RemoteConfig) {
     await ctx.reply("📋 *Sessions* — tap to switch:", { parse_mode: "Markdown", reply_markup: { inline_keyboard: chunked } })
   })
 
+  bot.command(["cost", "usage"], async (ctx) => {
+    const sid = sessionIdFor(ctx)
+    if (!sid) return ctx.reply("No active session.")
+    const msgs = await opencode.client.session.messages({ path: { id: sid } }).catch(() => null)
+    if (!msgs?.data) return ctx.reply("No messages yet.")
+    const prov = await opencode.client.config.providers().catch(() => null)
+    const providers: any[] = (prov?.data as any)?.providers ?? []
+    const rateOf = (pid: string, mid: string) => providers.find((p: any) => p.id === pid)?.models?.[mid]?.cost ?? null
+
+    type Agg = { scenes: number; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }
+    const byModel = new Map<string, Agg>()
+    for (const m of msgs.data as any[]) {
+      const info = m.info ?? m
+      if (info.role !== "assistant" || !info.modelID) continue
+      const key = `${info.providerID}/${info.modelID}`
+      const t = info.tokens ?? {}
+      const agg = byModel.get(key) ?? { scenes: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
+      agg.scenes++
+      agg.input += t.input ?? 0
+      agg.output += (t.output ?? 0) + (t.reasoning ?? 0)
+      agg.cacheRead += t.cache?.read ?? 0
+      agg.cacheWrite += t.cache?.write ?? 0
+      let cost = info.cost
+      if (cost == null) {
+        const r = rateOf(info.providerID, info.modelID)
+        cost = r
+          ? ((t.input ?? 0) * (r.input ?? 0) +
+              ((t.output ?? 0) + (t.reasoning ?? 0)) * (r.output ?? 0) +
+              (t.cache?.read ?? 0) * (r.cache?.read ?? 0) +
+              (t.cache?.write ?? 0) * (r.cache?.write ?? 0)) / 1e6
+          : 0
+      }
+      agg.cost += cost
+      byModel.set(key, agg)
+    }
+    if (!byModel.size) return ctx.reply("No assistant messages yet.")
+
+    // the star = the priciest model that played in this session
+    let starKey = ""
+    let starRate: any = null
+    let starScore = -1
+    for (const key of byModel.keys()) {
+      const [pid, ...rest] = key.split("/")
+      const r = rateOf(pid!, rest.join("/"))
+      const score = r ? (r.input ?? 0) + (r.output ?? 0) : 0
+      if (score > starScore) {
+        starScore = score
+        starKey = key
+        starRate = r
+      }
+    }
+
+    const fmtK = (n: number) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n))
+    const usd = (n: number) => "$" + n.toFixed(4)
+    let total = 0
+    let allStar = 0
+    const lines: string[] = []
+    for (const [key, a] of byModel) {
+      total += a.cost
+      allStar += starRate
+        ? (a.input * (starRate.input ?? 0) +
+            a.output * (starRate.output ?? 0) +
+            a.cacheRead * (starRate.cache?.read ?? 0) +
+            a.cacheWrite * (starRate.cache?.write ?? 0)) / 1e6
+        : 0
+      lines.push(
+        `${key === starKey ? "⭐" : "🤸"} ${key}\n      ${a.scenes} scene${a.scenes > 1 ? "s" : ""} · ${fmtK(a.input + a.cacheRead)} in · ${fmtK(a.output)} out · ${usd(a.cost)}`,
+      )
+    }
+    const saved = Math.max(0, allStar - total)
+    const pct = allStar > 0 ? Math.round((saved / allStar) * 100) : 0
+    const report =
+      "🎬 Hollywood cost report — this session\n\n" +
+      lines.join("\n") +
+      `\n\n💵 Total: ${usd(total)}` +
+      `\n⭐ All-star (${starKey} in every scene): ${usd(allStar)}` +
+      `\n🤑 Saved by stunt doubles: ${usd(saved)}${allStar > 0 ? ` (${pct}%)` : ""}` +
+      (allStar === 0 ? "\nℹ️ Free models — every scene cost $0, savings show with paid providers." : "")
+    await sendChunked(ctx, report)
+  })
+
   bot.command("undo", async (ctx) => {
     const sid = sessionIdFor(ctx)
     if (!sid) return ctx.reply("No active session.")
@@ -637,7 +718,7 @@ export async function startBridge(config: RemoteConfig) {
     ctx.reply(
       "🎬 Commands:\n" +
         "/new — fresh session\n/sessions — list or switch session\n/status — current session\n/stop — abort task\n" +
-        "/model — show or change model\n/undo — undo last\n/fork — fork session\n/rename — rename session\n" +
+        "/model — show or change model (/model auto = router)\n/cost — savings report\n/undo — undo last\n/fork — fork session\n/rename — rename session\n" +
         "/compact — compact session\n/export — export transcript\n/copy — copy transcript\n/agents — list agents\n" +
         "/skills — list skills\n/init — init with AGENTS.md\n/share — share session\n/review — review changes\n" +
         "/move — change project dir\n/thinking — toggle thinking\n/remote — connection status\n" +
@@ -841,6 +922,7 @@ export async function startBridge(config: RemoteConfig) {
       { command: "status", description: "Current session info" },
       { command: "stop", description: "Abort running task" },
       { command: "model", description: "Show or change model" },
+      { command: "cost", description: "Cost report + stunt-double savings" },
       { command: "undo", description: "Undo last message" },
       { command: "fork", description: "Fork current session" },
       { command: "rename", description: "Rename session" },
