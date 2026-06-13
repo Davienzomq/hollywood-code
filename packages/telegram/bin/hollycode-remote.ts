@@ -2,6 +2,7 @@
 import { runWizard } from "../src/setup"
 import { loadConfig, saveConfig } from "../src/config"
 import { startBridge } from "../src/index"
+import { installStartup, removeStartup, startupStatus } from "../src/startup"
 import { spawn, spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import fs from "node:fs"
@@ -49,13 +50,21 @@ let cliModel: string | undefined
 let cliDirectory: string | undefined
 let bridgeMode = false // internal: this IS the detached background process
 let foreground = false // debugging: run the bridge in this terminal
+let installStartupFlag = false // register OS auto-start, then exit
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--model" && args[i + 1]) cliModel = args[++i]
   else if (args[i] === "--directory" && args[i + 1]) cliDirectory = args[++i]
   else if (args[i] === "--bridge") bridgeMode = true
   else if (args[i] === "--foreground") foreground = true
-  else if (args[i] === "--stop") {
+  else if (args[i] === "--install-startup") installStartupFlag = true
+  else if (args[i] === "--remove-startup") {
+    removeStartup()
+    process.exit(0)
+  } else if (args[i] === "--startup-status") {
+    console.log(startupStatus() ? "✅  Auto-start is installed." : "⬜  Auto-start is not installed.")
+    process.exit(0)
+  } else if (args[i] === "--stop") {
     killStrayBridges()
     console.log("⏹  Bot stopped.")
     process.exit(0)
@@ -68,6 +77,9 @@ for (let i = 0; i < args.length; i++) {
     console.log("  --model <provider/id>     Model to use (default: server default)")
     console.log("  --directory <path>        Project directory (default: current dir)")
     console.log("  --stop                    Stop the background bot")
+    console.log("  --install-startup         Start the bot automatically on boot/logon")
+    console.log("  --remove-startup          Remove the auto-start entry")
+    console.log("  --startup-status          Show whether auto-start is enabled")
     console.log("  --foreground              Run attached to this terminal (debugging)")
     console.log("  --help                    Show this help")
     process.exit(0)
@@ -87,6 +99,12 @@ if (cliModel) config.model = cliModel
 if (cliDirectory && config.directory !== cliDirectory) {
   config.directory = cliDirectory
   saveConfig(config) // persist like /move does — next plain run stays here
+}
+
+if (installStartupFlag) {
+  // Config is loaded, so the auto-start entry uses the saved project directory.
+  const ok = installStartup(config.directory || cwd)
+  process.exit(ok ? 0 : 1)
 }
 
 if (bridgeMode || foreground) {
