@@ -1,129 +1,160 @@
 <p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
-  </a>
+  <h1 align="center">🎬 Hollycode</h1>
 </p>
-<p align="center">The open source AI coding agent.</p>
+<p align="center">The AI coding agent that casts the right model for every scene.</p>
 <p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
+  <a href="https://github.com/Davienzomq/hollywood-code"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green?style=flat-square" /></a>
+  <a href="https://github.com/Davienzomq/hollywood-code"><img alt="Built on opencode" src="https://img.shields.io/badge/built%20on-opencode-blue?style=flat-square" /></a>
 </p>
-
-<p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.bs.md">Bosanski</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a> |
-  <a href="README.uk.md">Українська</a> |
-  <a href="README.bn.md">বাংলা</a> |
-  <a href="README.gr.md">Ελληνικά</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
-</p>
-
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
 
-### Installation
+**Hollycode** is an open-source AI coding agent for your terminal — a fork of
+[opencode](https://github.com/anomalyco/opencode) with three things built in:
 
-```bash
-# YOLO
-curl -fsSL https://opencode.ai/install | bash
+- **🎬 The stunt-double router.** Every message is scored and *cast* to the
+  cheapest model that can do the job — easy chat goes to the stunt doubles
+  (Haiku / Flash / mini), hard reasoning goes to the star (Opus / Fable / GPT-5).
+  Your frontier model stops paying to do the stunts. Run `/cost` to see what the
+  doubles saved you.
+- **📱 Remote control that lives where you do.** One command pairs the agent to
+  **Telegram, Discord, Email, Slack, Signal or WhatsApp**. Permission requests
+  arrive as Approve/Deny buttons, the bot runs as a real background daemon, and
+  it can auto-start on boot so it survives reboots.
+- **🧰 Native tools, free voice, real memory.** A built-in browser (Playwright)
+  and image generation (FAL.ai) via MCP, a free fully-local voice loop (Piper
+  TTS + whisper.cpp STT), full-text recall of past sessions, and auto-memory
+  that quietly learns your project and preferences.
 
-# Package managers
-npm i -g opencode-ai@latest        # or bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS and Linux (recommended, always up to date)
-brew install opencode              # macOS and Linux (official brew formula, updated less)
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # Any OS
-nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev branch
-```
-
-> [!TIP]
-> Remove versions older than 0.1.x before installing.
-
-### Desktop App (BETA)
-
-OpenCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
-
-| Platform              | Download                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe` |
-| Linux                 | `.deb`, `.rpm`, or `.AppImage`     |
-
-```bash
-# macOS (Homebrew)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
-```
-
-#### Installation Directory
-
-The install script respects the following priority order for the installation path:
-
-1. `$OPENCODE_INSTALL_DIR` - Custom installation directory
-2. `$XDG_BIN_DIR` - XDG Base Directory Specification compliant path
-3. `$HOME/bin` - Standard user binary directory (if it exists or can be created)
-4. `$HOME/.opencode/bin` - Default fallback
-
-```bash
-# Examples
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
-```
-
-### Agents
-
-OpenCode includes two built-in agents you can switch between with the `Tab` key.
-
-- **build** - Default, full-access agent for development work
-- **plan** - Read-only agent for analysis and code exploration
-  - Denies file edits by default
-  - Asks permission before running bash commands
-  - Ideal for exploring unfamiliar codebases or planning changes
-
-Also included is a **general** subagent for complex searches and multistep tasks.
-This is used internally and can be invoked using `@general` in messages.
-
-Learn more about [agents](https://opencode.ai/docs/agents).
-
-### Documentation
-
-For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).
-
-### Contributing
-
-If you're interested in contributing to OpenCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
-
-### Building on OpenCode
-
-If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
+It keeps everything you expect from opencode — the TUI, 75+ providers, agents,
+skills, MCP — and adds the Hollywood layer on top.
 
 ---
 
-**Join our community** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+## Installation
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/dev/install.ps1 | iex
+```
+
+**macOS / Linux**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Davienzomq/hollywood-code/dev/install.sh | bash
+```
+
+The installer needs no `git` — it downloads a ZIP/tarball, installs [Bun](https://bun.sh)
+if missing, and drops the launchers onto your PATH. Then:
+
+```bash
+cd <your project>
+hollycode                 # start coding in the terminal
+hollycode-remote          # pair your phone (Telegram, Discord, …) — setup wizard
+```
+
+### Update
+
+```bash
+hollycode-update          # pull the latest version
+```
+
+> Re-running the install one-liner does the same thing. If you installed an
+> **older** build that predates these launchers, run the install one-liner once
+> — it drops `hollycode-update` and `hollycode-uninstall` for you.
+
+### Uninstall
+
+```bash
+hollycode-uninstall       # stop the gateway, remove auto-start, delete the install
+```
+
+Uninstall stops the remote-control daemon, removes the OS auto-start entry, and
+deletes `~/.hollycode` plus the launchers. Bun is left installed (other tools
+may rely on it).
+
+---
+
+## Highlights
+
+### The stunt-double router
+
+Each message is scored on four dimensions — complexity, context size, quality
+needed, and speed/cost pressure — and mapped to a tier:
+
+| Score | Cast | Good for |
+|---|---|---|
+| low | stunt double (Haiku / Flash / mini) | classification, chat, formatting, simple Q&A |
+| medium | supporting (Sonnet / Pro / GPT-5) | code, refactors, analysis, explanations |
+| high | the star (Opus / Fable / GPT-5-codex) | architecture, deep reasoning, critical decisions |
+
+It is **host-aware** — it only casts models the current host actually has — and
+the reply tells you which model played the scene. Pin a model anytime with
+`/model provider/id`, or go back to auto-casting with `/model auto`.
+
+### Remote control (the gateway)
+
+`hollycode-remote` runs a setup wizard, then hosts your agent over one or more
+channels at once through a single embedded server:
+
+- **Telegram · Discord · Email · Slack · Signal · WhatsApp**
+- Permission and clarifying questions arrive as buttons in the chat.
+- `/schedule` cron tasks, `/recall` past sessions, `/remember` facts, `/voice`
+  to talk to it, `/tools` to toggle the browser/image tools, and ~45 commands.
+- Optional **auto-start on boot** (Windows Task Scheduler / macOS launchd /
+  Linux systemd) so the bot is always alive after a restart.
+
+### Native tools (MCP)
+
+```text
+/tools browser on     # Playwright — navigate, click, read live pages (free, local)
+/tools image on       # FAL.ai image generation (set FAL_KEY)
+```
+
+Both are real MCP servers, so they show up as native tools to the model in the
+terminal and over every channel.
+
+### Free, local voice
+
+Send a voice message and the agent transcribes it; ask it to speak and it
+replies with audio — entirely offline using **Piper** (TTS) and **whisper.cpp**
+(STT), bundled by the installer. An API key (OpenAI/Groq) works too if you
+prefer.
+
+### Memory & skills
+
+Full-text `/recall` over past sessions, silent auto-memory that curates
+`AGENTS.md`, autonomous skill creation with a curator that archives unused ones,
+and the full skills library.
+
+### Datagen (for training)
+
+`hollycode-datagen` runs a dataset of prompts through the agent in parallel and
+records ShareGPT tool-calling trajectories — a dataset you can fine-tune on. See
+[`packages/gateway/datagen-examples/`](packages/gateway/datagen-examples/).
+
+---
+
+## Agents
+
+Like opencode, Hollycode ships two primary agents you switch with `Tab`:
+
+- **build** — full-access agent for development work.
+- **plan** — read-only agent for analysis and exploration.
+
+Plus a **general** subagent for complex searches and multi-step tasks
+(`@general`).
+
+## Built on opencode
+
+Hollycode is a fork of [opencode](https://github.com/anomalyco/opencode) and is
+**not affiliated with or endorsed by the opencode team**. The upstream MIT
+license is preserved in [LICENSE](./LICENSE); huge thanks to the opencode
+authors for the foundation. The Hollywood layer (stunt-double router,
+multi-channel gateway, native tools, local voice, datagen) is the part this
+project adds.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
