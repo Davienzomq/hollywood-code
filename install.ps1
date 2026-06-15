@@ -64,11 +64,36 @@ Set-Content -Path (Join-Path $BUN_BIN "hollycode.cmd") -Value $hollycode -Encodi
 
 $remote = @"
 @echo off
-rem Hollycode — Remote Control (Telegram). First run: interactive setup wizard.
+rem Hollycode — Remote Control (multi-channel gateway). First run: setup wizard.
 set "HOLLY_PROJ=%CD%"
-"%USERPROFILE%\.bun\bin\bun.exe" run "%USERPROFILE%\.hollycode\packages\telegram\bin\hollycode-remote.ts" --directory "%HOLLY_PROJ%" %*
+"%USERPROFILE%\.bun\bin\bun.exe" run "%USERPROFILE%\.hollycode\packages\gateway\bin\hollycode-gateway.ts" --directory "%HOLLY_PROJ%" %*
 "@
 Set-Content -Path (Join-Path $BUN_BIN "hollycode-remote.cmd") -Value $remote -Encoding ASCII
+
+# Update launcher — re-runs the installer to pull the latest version.
+$update = @"
+@echo off
+rem Hollycode — update to the latest version.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/dev/install.ps1 | iex"
+"@
+Set-Content -Path (Join-Path $BUN_BIN "hollycode-update.cmd") -Value $update -Encoding ASCII
+
+# Uninstall launcher — stops the gateway, removes auto-start, deletes the install
+# and the launchers. Bun is left installed (other tools may use it).
+$uninstall = @"
+@echo off
+rem Hollycode — uninstall.
+echo Removing Hollycode...
+"%USERPROFILE%\.bun\bin\bun.exe" run "%USERPROFILE%\.hollycode\packages\gateway\bin\hollycode-gateway.ts" --remove-startup 2>nul
+"%USERPROFILE%\.bun\bin\bun.exe" run "%USERPROFILE%\.hollycode\packages\gateway\bin\hollycode-gateway.ts" --stop 2>nul
+powershell -NoProfile -Command "Remove-Item -Recurse -Force '%USERPROFILE%\.hollycode' -ErrorAction SilentlyContinue"
+del "%USERPROFILE%\.bun\bin\hollycode.cmd" 2>nul
+del "%USERPROFILE%\.bun\bin\hollycode-remote.cmd" 2>nul
+del "%USERPROFILE%\.bun\bin\hollycode-update.cmd" 2>nul
+echo Hollycode uninstalled. (Bun was left installed.)
+del "%USERPROFILE%\.bun\bin\hollycode-uninstall.cmd" 2>nul
+"@
+Set-Content -Path (Join-Path $BUN_BIN "hollycode-uninstall.cmd") -Value $uninstall -Encoding ASCII
 
 # 6. Free local voice (Piper) — best-effort, never fails the install.
 Write-Step "Installing free local voice (Piper)..."
@@ -94,7 +119,9 @@ Write-Host "✅ Hollycode installed!" -ForegroundColor Green
 Write-Host ""
 Write-Host "   cd <your project>"
 Write-Host "   hollycode              " -NoNewline; Write-Host "# start coding (free models included)" -ForegroundColor DarkGray
-Write-Host "   /remote-control        " -NoNewline; Write-Host "# pair your phone over Telegram" -ForegroundColor DarkGray
+Write-Host "   hollycode-remote       " -NoNewline; Write-Host "# pair your phone (Telegram, Discord, …)" -ForegroundColor DarkGray
+Write-Host "   hollycode-update       " -NoNewline; Write-Host "# update to the latest version" -ForegroundColor DarkGray
+Write-Host "   hollycode-uninstall    " -NoNewline; Write-Host "# remove Hollycode" -ForegroundColor DarkGray
 Write-Host ""
 if (":$env:PATH:" -notlike "*$BUN_BIN*") {
     Write-Host "⚠  Open a NEW terminal so $BUN_BIN is on your PATH." -ForegroundColor Yellow

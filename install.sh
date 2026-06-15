@@ -55,18 +55,43 @@ chmod +x "$BUN_BIN/hollycode"
 
 cat > "$BUN_BIN/hollycode-remote" <<EOF
 #!/usr/bin/env bash
-# Hollycode — Remote Control (Telegram). First run: interactive setup wizard.
+# Hollycode — Remote Control (multi-channel gateway). First run: setup wizard.
 HOLLY_PROJ="\$(pwd)"
-exec "$BUN" run "\$HOME/.hollycode/packages/telegram/bin/hollycode-remote.ts" --directory "\$HOLLY_PROJ" "\$@"
+exec "$BUN" run "\$HOME/.hollycode/packages/gateway/bin/hollycode-gateway.ts" --directory "\$HOLLY_PROJ" "\$@"
 EOF
 chmod +x "$BUN_BIN/hollycode-remote"
+
+# Update launcher — re-runs the installer to pull the latest version.
+cat > "$BUN_BIN/hollycode-update" <<'EOF'
+#!/usr/bin/env bash
+# Hollycode — update to the latest version.
+curl -fsSL https://raw.githubusercontent.com/Davienzomq/hollywood-code/dev/install.sh | bash
+EOF
+chmod +x "$BUN_BIN/hollycode-update"
+
+# Uninstall launcher — stops the gateway, removes auto-start, deletes the install
+# and the launchers. Bun is left installed (other tools may use it).
+cat > "$BUN_BIN/hollycode-uninstall" <<EOF
+#!/usr/bin/env bash
+# Hollycode — uninstall.
+echo "Removing Hollycode..."
+"$BUN" run "\$HOME/.hollycode/packages/gateway/bin/hollycode-gateway.ts" --remove-startup 2>/dev/null || true
+"$BUN" run "\$HOME/.hollycode/packages/gateway/bin/hollycode-gateway.ts" --stop 2>/dev/null || true
+rm -rf "\$HOME/.hollycode"
+rm -f "$BUN_BIN/hollycode" "$BUN_BIN/hollycode-remote" "$BUN_BIN/hollycode-update"
+echo "Hollycode uninstalled. (Bun was left installed.)"
+rm -f "$BUN_BIN/hollycode-uninstall"
+EOF
+chmod +x "$BUN_BIN/hollycode-uninstall"
 
 echo ""
 echo -e "${GREEN}✅ Hollycode installed!${NC}"
 echo ""
 echo -e "   cd <your project>"
 echo -e "   hollycode              ${GRAY}# start coding (free models included)${NC}"
-echo -e "   /remote-control        ${GRAY}# pair your phone over Telegram${NC}"
+echo -e "   hollycode-remote       ${GRAY}# pair your phone (Telegram, Discord, …)${NC}"
+echo -e "   hollycode-update       ${GRAY}# update to the latest version${NC}"
+echo -e "   hollycode-uninstall    ${GRAY}# remove Hollycode${NC}"
 echo ""
 case ":$PATH:" in
   *":$BUN_BIN:"*) ;;
