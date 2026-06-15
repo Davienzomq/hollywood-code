@@ -82,9 +82,12 @@ import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, renameSync } from "node:fs"
+import os from "node:os"
+import nodePath from "node:path"
+import { DialogPrompt } from "./ui/dialog-prompt"
 
 const appGlobalBindingCommands = [
   "session.list",
@@ -757,6 +760,162 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         },
         category: "System",
       },
+      // ── Hollycode memory/skill commands (parity with the Telegram gateway) ──
+      {
+        name: "hollycode.recall",
+        title: "Recall — search past sessions",
+        slashName: "recall",
+        category: "Memory",
+        run: async () => {
+          const q = await DialogPrompt.show(dialog, "Recall — search past sessions", { placeholder: "keywords" })
+          if (!q) return
+          const res = await sdk.client.session.list({ search: q, limit: 10 } as any).catch(() => null)
+          const all = (((res as any)?.data ?? (res as any)) ?? []) as any[]
+          const lines = all.slice(0, 10).map((s: any) => `• ${s.title || s.id}`)
+          DialogAlert.show(dialog, `Recall "${q}"`, lines.length ? lines.join("\n") : "No matching sessions.")
+        },
+      },
+      {
+        name: "hollycode.remember",
+        title: "Remember a fact (AGENTS.md)",
+        slashName: "remember",
+        category: "Memory",
+        run: async () => {
+          const fact = await DialogPrompt.show(dialog, "Remember", { placeholder: "a durable fact to save" })
+          if (!fact) return
+          try {
+            const dir = project.instance.directory() || process.cwd()
+            const p = nodePath.join(dir, "AGENTS.md")
+            let content = ""
+            try { content = readFileSync(p, "utf8") } catch { /* new file */ }
+            const header = "## Memory (added via /remember)"
+            if (!content.includes(header)) content = content.trimEnd() + (content.trim() ? "\n\n" : "") + header + "\n"
+            content = content.trimEnd() + `\n- ${fact}\n`
+            writeFileSync(p, content)
+            toast.show({ message: "🧠 Saved to AGENTS.md", variant: "success" })
+          } catch (e: any) {
+            toast.show({ message: `Could not save: ${e?.message ?? e}`, variant: "error" })
+          }
+        },
+      },
+      {
+        name: "hollycode.profile",
+        title: "User profile (what the agent knows about you)",
+        slashName: "profile",
+        category: "Memory",
+        run: () => {
+          const pf = nodePath.join(os.homedir(), ".config", "opencode", "AGENTS.md")
+          let content = ""
+          try { content = readFileSync(pf, "utf8") } catch { /* none yet */ }
+          const m = content.match(/## About the user\s*([\s\S]*?)(?=\n## |\n# |$)/)
+          const body = m ? m[1]!.trim() : ""
+          DialogAlert.show(dialog, "Your profile", body || "No profile yet — chat and I'll learn who you are.")
+        },
+      },
+      {
+        name: "hollycode.curate",
+        title: "Archive unused auto-skills",
+        slashName: "curate",
+        category: "Memory",
+        run: () => {
+          const base = nodePath.join(os.homedir(), ".config", "opencode", "skills", "auto")
+          const archived: string[] = []
+          try {
+            if (existsSync(base)) {
+              const maxAge = 30 * 86400000
+              const archiveDir = nodePath.join(base, "_archived")
+              for (const name of readdirSync(base)) {
+                if (name === "_archived") continue
+                const md = nodePath.join(base, name, "SKILL.md")
+                if (!existsSync(md)) continue
+                if (Date.now() - statSync(md).mtimeMs > maxAge) {
+                  mkdirSync(archiveDir, { recursive: true })
+                  renameSync(nodePath.join(base, name), nodePath.join(archiveDir, name))
+                  archived.push(name)
+                }
+              }
+            }
+          } catch { /* best-effort */ }
+          toast.show({
+            message: archived.length ? `🧹 Archived ${archived.length} unused skill(s)` : "🧹 Nothing to archive",
+            variant: "info",
+          })
+        },
+      },
+      {
+        name: "hollycode.cost",
+        title: "Cost — this session",
+        slashName: "cost",
+        category: "Memory",
+        run: () => {
+          const sid = route.data.type === "session" ? (route.data as any).sessionID : undefined
+          if (!sid) {
+            toast.show({ message: "Open a session first", variant: "info" })
+            return
+          }
+          const s = sync.session.get(sid) as any
+          const cost = s?.cost ?? 0
+          DialogAlert.show(
+            dialog,
+            "Session cost",
+            `$${cost.toFixed(4)} spent this session.\n\nThe sidebar shows live token usage. In Telegram, /cost also breaks down the stunt-double savings per model.`,
+          )
+        },
+      },
+      {
+        name: "hollycode.tools",
+        title: "Native tools (browser) — enable/disable",
+        slashName: "tools",
+        slashAliases: ["mcps"],
+        category: "Memory",
+        run: async () => {
+          // Mirrors the gateway /tools command: toggles well-known MCP servers in
+          // the project's opencode.json. opencode loads MCP at boot, so a restart
+          // is needed for the change to take effect — same as the gateway reboot.
+          const imageMcp = fileURLToPath(new URL("../../gateway/bin/hollycode-image-mcp.ts", import.meta.url))
+          const CATALOG: Record<string, { label: string; command: string[]; needsKey?: string }> = {
+            browser: { label: "Browser (Playwright)", command: ["npx", "-y", "@playwright/mcp@latest"] },
+            image: { label: "Image gen (FAL.ai)", command: [process.execPath, "run", imageMcp], needsKey: "FAL_KEY" },
+          }
+          const dir = project.instance.directory() || process.cwd()
+          const p = nodePath.join(dir, "opencode.json")
+          let raw: any = { $schema: "https://opencode.ai/config.json" }
+          try {
+            if (existsSync(p)) raw = JSON.parse(readFileSync(p, "utf8").replace(/^﻿/, ""))
+          } catch {
+            toast.show({ message: "Could not parse opencode.json — edit mcp entries manually", variant: "error" })
+            return
+          }
+          const state = Object.keys(CATALOG)
+            .map((id) => `${id}=${raw?.mcp?.[id] && raw.mcp[id].enabled !== false ? "on" : "off"}`)
+            .join("  ")
+          const choice = await DialogPrompt.show(dialog, `Tools: ${state} — type "<id> on|off" (e.g. browser on)`, {
+            placeholder: "browser on",
+          })
+          const parts = (choice ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean)
+          const id = parts[0]
+          const want = parts[1]
+          if (!id || !CATALOG[id] || (want !== "on" && want !== "off")) {
+            if (choice) toast.show({ message: `Usage: <id> on|off — ids: ${Object.keys(CATALOG).join(", ")}`, variant: "info" })
+            return
+          }
+          raw.mcp = raw.mcp ?? {}
+          raw.mcp[id] = { type: "local", command: CATALOG[id]!.command, enabled: want === "on" }
+          try {
+            writeFileSync(p, JSON.stringify(raw, null, 2))
+            const needsKey = CATALOG[id]!.needsKey
+            const warn =
+              want === "on" && needsKey && !process.env[needsKey] ? `\n\n⚠️ ${needsKey} is not set — set it for this tool to work.` : ""
+            DialogAlert.show(
+              dialog,
+              "Native tools",
+              `${id} is now ${want}. Restart hollycode for it to take effect.${warn}`,
+            )
+          } catch (e: any) {
+            toast.show({ message: `Could not write config: ${e?.message ?? e}`, variant: "error" })
+          }
+        },
+      },
       {
         name: "remote.control",
         title: "Remote control (Telegram)",
@@ -767,11 +926,11 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           // The setup wizard is interactive (paste token, pair phone), so it
           // runs in its OWN terminal window — the bridge must outlive the TUI.
           const dir = project.instance.directory() || process.cwd()
-          const binTs = fileURLToPath(new URL("../../telegram/bin/hollycode-remote.ts", import.meta.url))
+          const binTs = fileURLToPath(new URL("../../gateway/bin/hollycode-gateway.ts", import.meta.url))
           // --directory is explicit: with a saved config the launcher would
           // otherwise reuse the previously configured project folder.
           const launcher =
-            (existsSync(binTs) ? `"${process.execPath}" run "${binTs}"` : "hollycode-remote") + ` --directory "${dir}"`
+            (existsSync(binTs) ? `"${process.execPath}" run "${binTs}"` : "hollycode-gateway") + ` --directory "${dir}"`
           try {
             if (process.platform === "win32") {
               // cmd strips the first+last quote of the /k argument when it contains
@@ -800,13 +959,43 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
               child.unref()
             }
             toast.show({
-              message: "Telegram setup opened in a new terminal window — follow the steps there",
+              message: "Gateway setup opened in a new terminal window — follow the steps there",
               variant: "success",
             })
           } catch {
-            toast.show({ message: "Could not open a terminal — run `hollycode-remote` manually", variant: "error" })
+            toast.show({ message: "Could not open a terminal — run `hollycode-gateway` manually", variant: "error" })
           }
           dialog.clear()
+        },
+      },
+      {
+        name: "hollycode.autostart",
+        title: "Auto-start the gateway on boot",
+        slashName: "autostart",
+        slashAliases: ["startup"],
+        category: "System",
+        run: async () => {
+          // Manage the gateway's OS auto-start (Task Scheduler / launchd / systemd)
+          // by shelling out to the gateway launcher's flags — same mechanism as
+          // `hollycode-gateway --install-startup`.
+          const binTs = fileURLToPath(new URL("../../gateway/bin/hollycode-gateway.ts", import.meta.url))
+          const runFlag = (flag: string) => {
+            const r = existsSync(binTs)
+              ? spawnSync(process.execPath, ["run", binTs, flag], { encoding: "utf8" })
+              : spawnSync("hollycode-gateway", [flag], { encoding: "utf8", shell: true })
+            return ((r.stdout ?? "") + (r.stderr ?? "")).trim()
+          }
+          const status = runFlag("--startup-status")
+          const on = status.includes("installed") && !status.includes("not installed")
+          const choice = await DialogPrompt.show(
+            dialog,
+            `Auto-start is ${on ? "ON" : "OFF"} — type on or off`,
+            { placeholder: on ? "off" : "on" },
+          )
+          const want = (choice ?? "").trim().toLowerCase()
+          if (want !== "on" && want !== "off") return
+          const out = runFlag(want === "on" ? "--install-startup" : "--remove-startup")
+          DialogAlert.show(dialog, "Auto-start", out || `Auto-start ${want === "on" ? "enabled" : "disabled"}.`)
         },
       },
       {

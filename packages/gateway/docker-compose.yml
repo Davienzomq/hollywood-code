@@ -1,0 +1,17 @@
+# Hollycode Gateway — always-on deployment (Phase E).
+# From the repo root:  docker compose -f packages/gateway/docker-compose.yml up -d
+# Put a configured gateway.json at ./data/.config/hollywood/gateway.json first
+# (run the wizard locally once, then copy it up). Mount your project at ./project.
+services:
+  hollycode-gateway:
+    build:
+      context: ../..
+      dockerfile: packages/gateway/Dockerfile
+    container_name: hollycode-gateway
+    restart: unless-stopped
+    volumes:
+      - ./data:/data # config + sessions + cron jobs (persisted)
+      - ./project:/project # the codebase the agent works on
+    # WhatsApp webhook port (only if you enable the WhatsApp channel):
+    ports:
+      - "3100:3100"

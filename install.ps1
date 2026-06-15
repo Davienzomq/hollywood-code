@@ -70,6 +70,25 @@ set "HOLLY_PROJ=%CD%"
 "@
 Set-Content -Path (Join-Path $BUN_BIN "hollycode-remote.cmd") -Value $remote -Encoding ASCII
 
+# 6. Free local voice (Piper) — best-effort, never fails the install.
+Write-Step "Installing free local voice (Piper)..."
+try {
+    & (Join-Path $DEST "scripts\install-piper.ps1")
+} catch {
+    Write-Ok "Piper voice skipped (optional) — you can run scripts\install-piper.ps1 later."
+}
+
+# 7. Native browser tool (Playwright MCP) — pre-download Chromium, best-effort.
+# The browser tool is on by default; the MCP server installs on first use, but
+# pre-fetching the browser here makes that first use instant.
+Write-Step "Preparing the native browser tool (Playwright)..."
+try {
+    & npx -y playwright@latest install chromium 2>$null
+    Write-Ok "Browser tool ready (toggle with /tools)."
+} catch {
+    Write-Ok "Browser tool will download on first use — no action needed."
+}
+
 Write-Host ""
 Write-Host "✅ Hollycode installed!" -ForegroundColor Green
 Write-Host ""
