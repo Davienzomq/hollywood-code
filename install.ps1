@@ -1,5 +1,5 @@
 # Hollycode installer (Windows) — downloads a ZIP, no git required.
-#   irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/dev/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/main/install.ps1 | iex
 #
 # Installs Bun if missing, downloads the repo to %USERPROFILE%\.hollycode,
 # runs `bun install`, and drops `hollycode` + `hollycode-remote` launchers
@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 function Write-Step($msg) { Write-Host "🎬 $msg" -ForegroundColor Yellow }
 function Write-Ok($msg)   { Write-Host "   $msg" -ForegroundColor DarkGray }
 
-$ZIP     = "https://github.com/Davienzomq/hollywood-code/archive/refs/heads/dev.zip"
+$ZIP     = "https://github.com/Davienzomq/hollywood-code/archive/refs/heads/main.zip"
 $DEST    = Join-Path $env:USERPROFILE ".hollycode"
 $BUN_BIN = Join-Path $env:USERPROFILE ".bun\bin"
 $BUN_EXE = Join-Path $BUN_BIN "bun.exe"
@@ -32,7 +32,7 @@ try {
     Write-Step "Extracting to $DEST..."
     Expand-Archive -Path (Join-Path $tmp "repo.zip") -DestinationPath $tmp -Force
     if (Test-Path $DEST) { Remove-Item -Recurse -Force $DEST }
-    Move-Item (Join-Path $tmp "hollywood-code-dev") $DEST
+    Move-Item (Join-Path $tmp "hollywood-code-main") $DEST
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
@@ -74,7 +74,7 @@ Set-Content -Path (Join-Path $BUN_BIN "hollycode-remote.cmd") -Value $remote -En
 $update = @"
 @echo off
 rem Hollycode — update to the latest version.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/dev/install.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/main/install.ps1 | iex"
 "@
 Set-Content -Path (Join-Path $BUN_BIN "hollycode-update.cmd") -Value $update -Encoding ASCII
 

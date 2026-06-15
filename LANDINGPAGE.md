@@ -26,8 +26,8 @@ Criar na raiz do repo (copiar padrão do stuntdouble install.sh/ps1):
   - `hollycode-remote.cmd` → `bun run %USERPROFILE%\.hollycode\packages\telegram\bin\hollycode-remote.ts`
 - **install.sh** (mac/linux): mesmo fluxo com `curl -fsSL bun.sh/install | bash`, clone, symlinks em ~/.bun/bin
 - Comandos da página:
-  - Windows: `irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/dev/install.ps1 | iex`
-  - mac/linux: `curl -fsSL https://raw.githubusercontent.com/Davienzomq/hollywood-code/dev/install.sh | bash`
+  - Windows: `irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/main/install.ps1 | iex`
+  - mac/linux: `curl -fsSL https://raw.githubusercontent.com/Davienzomq/hollywood-code/main/install.sh | bash`
 
 ### Fase B — binários (depois): `bun build --compile` por plataforma → GitHub Releases
 → aí o installer baixa binário em vez de clonar (UX igual opencode). `hollycode upgrade` futuro.

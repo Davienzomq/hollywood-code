@@ -36,13 +36,13 @@ skills, MCP — and adds the Hollywood layer on top.
 **Windows** (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/dev/install.ps1 | iex
+irm https://raw.githubusercontent.com/Davienzomq/hollywood-code/main/install.ps1 | iex
 ```
 
 **macOS / Linux**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Davienzomq/hollywood-code/dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Davienzomq/hollywood-code/main/install.sh | bash
 ```
 
 The installer needs no `git` — it downloads a ZIP/tarball, installs [Bun](https://bun.sh)
