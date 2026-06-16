@@ -40,6 +40,11 @@ try {
 # 3. Dependencies
 Write-Step "Installing dependencies (this can take a minute)..."
 Push-Location $DEST
+# An optional native grammar (tree-sitter-powershell) can fail to build on
+# Windows without the Visual Studio C++ tools — that's only PowerShell syntax
+# highlighting and is non-fatal. But that failure can leave the first install
+# pass incomplete, so always run a second pass to finish linking the workspace.
+& $BUN_EXE install
 & $BUN_EXE install
 Pop-Location
 

@@ -34,6 +34,9 @@ mv "$tmp/hollywood-code-main" "$DEST"
 
 # 3. Dependencies
 step "Installing dependencies (this can take a minute)..."
+# A second pass finishes linking if an optional native postinstall (e.g.
+# tree-sitter-powershell without build tools) interrupted the first pass.
+(cd "$DEST" && "$BUN" install)
 (cd "$DEST" && "$BUN" install)
 
 # 4. Launchers
