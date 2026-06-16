@@ -1,6 +1,7 @@
 import { createSignal, createMemo, Show } from "solid-js"
 import { createStore } from "solid-js/store"
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { spawn } from "node:child_process"
 import nodePath from "node:path"
 import os from "node:os"
 import { fileURLToPath } from "node:url"
@@ -126,14 +127,48 @@ export function DialogOnboarding() {
     } catch {}
   }
 
-  const [messaging, setMessaging] = createStore<Record<string, boolean>>({})
+  const [setupOpened, setSetupOpened] = createSignal(false)
+
+  // Launch the gateway pairing wizard (token entry / pairing) in its own window —
+  // it's a separate long-lived process, like the /remote-control command.
+  const launchGatewaySetup = () => {
+    const d = project.instance.directory() || process.cwd()
+    const binTs = fileURLToPath(new URL("../../gateway/bin/hollycode-gateway.ts", import.meta.url))
+    const launcher =
+      (existsSync(binTs) ? `"${process.execPath}" run "${binTs}"` : "hollycode-gateway") + ` --setup --directory "${d}"`
+    try {
+      if (process.platform === "win32") {
+        const child = spawn("cmd.exe", ["/c", `start "Hollycode Messaging Setup" /D "${d}" cmd /k "${launcher}"`], {
+          detached: true,
+          stdio: "ignore",
+          windowsVerbatimArguments: true,
+        })
+        child.unref()
+      } else if (process.platform === "darwin") {
+        const script = `tell application "Terminal"\nactivate\ndo script "cd ${JSON.stringify(d)} && ${launcher.replaceAll('"', '\\"')}"\nend tell`
+        const child = spawn("osascript", ["-e", script], { detached: true, stdio: "ignore" })
+        child.unref()
+      } else {
+        const sh = `cd ${JSON.stringify(d)} && ${launcher}`
+        const child = spawn(
+          "sh",
+          ["-c", `(x-terminal-emulator -e sh -c '${sh}' || gnome-terminal -- sh -c '${sh}' || konsole -e sh -c '${sh}' || xterm -e sh -c '${sh}') >/dev/null 2>&1 &`],
+          { detached: true, stdio: "ignore" },
+        )
+        child.unref()
+      }
+      setSetupOpened(true)
+      toast.show({ message: "Opening messaging setup in a new window — enter your bot token / pair there", variant: "success" })
+    } catch {
+      toast.show({ message: "Could not open setup — run /remote-control manually", variant: "error" })
+    }
+  }
 
   const finish = () => {
     saveTools()
     markOnboarded()
     const onMcp = TOOL_ROWS.filter((t) => t.kind === "mcp" && mcp[t.id])
     const missing = [...new Set(onMcp.filter((t) => t.needsKey && !process.env[t.needsKey!]).map((t) => t.needsKey))]
-    const picked = MESSAGING.filter((m) => messaging[m.id]).map((m) => m.label)
     dialog.clear()
     DialogAlert.show(
       dialog,
@@ -141,7 +176,7 @@ export function DialogOnboarding() {
       [
         "Hollycode is ready. Restart it for tool changes to take effect.",
         missing.length ? `\n⚠️ Set ${missing.join(", ")} for the tools that need a key.` : "",
-        picked.length ? `\n📱 To finish pairing ${picked.join(", ")}, run /remote-control.` : "",
+        setupOpened() ? "\n📱 Finish pairing in the messaging-setup window that opened." : "",
         "\nTips: /model change AI · /tools toggle tools · /remote-control messaging · /setup redo this.",
       ]
         .filter(Boolean)
@@ -181,21 +216,26 @@ export function DialogOnboarding() {
     return opts
   })
 
-  // --- step 2: messaging platforms (multi-select) ---
+  // --- step 2: messaging — pick a channel to set up (opens the pairing wizard) ---
   const messagingOptions = createMemo<DialogSelectOption<string>[]>(() => {
+    const cat = "Messaging — pick one to set up (opens a window), or skip"
     const opts = MESSAGING.map((m) =>
       orange<string>({
         value: m.id,
-        title: `[${messaging[m.id] ? "✓" : " "}] ${m.label}`,
-        category: "Messaging — Space/Enter to toggle (optional)",
-        onSelect: () => setMessaging(m.id, (v) => !v),
+        title: m.label,
+        description: "opens token/pairing setup in a new window",
+        category: cat,
+        onSelect: () => {
+          launchGatewaySetup()
+          setStep(3)
+        },
       }),
     )
     opts.push(
       orange<string>({
-        value: "__next__",
-        title: "→  Continue to AI provider",
-        category: "Messaging — Space/Enter to toggle (optional)",
+        value: "__skip__",
+        title: "→  Skip — set up messaging later (/remote-control)",
+        category: cat,
         onSelect: () => setStep(3),
       }),
     )
