@@ -89,7 +89,7 @@ export function DialogOnboarding() {
   // --- tool config (writes the project opencode.json mcp block) ---
   const dir = project.instance.directory() || process.cwd()
   const cfgPath = nodePath.join(dir, "opencode.json")
-  const mcpBin = (name: string) => fileURLToPath(new URL(`../../gateway/bin/hollycode-${name}-mcp.ts`, import.meta.url))
+  const mcpBin = (name: string) => fileURLToPath(new URL(`../../../gateway/bin/hollycode-${name}-mcp.ts`, import.meta.url))
   const command: Record<string, string[]> = {
     browser: ["npx", "-y", "@playwright/mcp@latest"],
     image: [process.execPath, "run", mcpBin("image")],
@@ -133,9 +133,9 @@ export function DialogOnboarding() {
   // it's a separate long-lived process, like the /remote-control command.
   const launchGatewaySetup = () => {
     const d = project.instance.directory() || process.cwd()
-    const binTs = fileURLToPath(new URL("../../gateway/bin/hollycode-gateway.ts", import.meta.url))
+    const binTs = fileURLToPath(new URL("../../../gateway/bin/hollycode-gateway.ts", import.meta.url))
     const launcher =
-      (existsSync(binTs) ? `"${process.execPath}" run "${binTs}"` : "hollycode-gateway") + ` --setup --directory "${d}"`
+      (existsSync(binTs) ? `"${process.execPath}" run "${binTs}"` : "hollycode-remote") + ` --setup --directory "${d}"`
     try {
       if (process.platform === "win32") {
         const child = spawn("cmd.exe", ["/c", `start "Hollycode Messaging Setup" /D "${d}" cmd /k "${launcher}"`], {
