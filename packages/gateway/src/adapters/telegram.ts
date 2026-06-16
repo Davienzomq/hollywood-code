@@ -349,12 +349,25 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
     }
   }
 
+  // Outbound voice: cloud TTS → Ogg ("OggS") → sendVoice; local Piper → WAV
+  // ("RIFF") → sendAudio. Mirrors the per-message sendVoice responder.
+  const deliverVoice = async (conversationId: string, audio: Uint8Array): Promise<void> => {
+    const isOgg = audio[0] === 0x4f && audio[1] === 0x67 && audio[2] === 0x67 && audio[3] === 0x53
+    try {
+      if (isOgg) await bot.api.sendVoice(conversationId, new InputFile(audio, "reply.ogg"))
+      else await bot.api.sendAudio(conversationId, new InputFile(audio, "reply.wav"))
+    } catch {
+      /* best-effort */
+    }
+  }
+
   return {
     id: "telegram",
     label: "Telegram",
     start,
     stop,
     deliver,
+    deliverVoice,
   }
 }
 

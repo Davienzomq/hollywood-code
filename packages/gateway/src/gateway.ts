@@ -58,16 +58,20 @@ export async function startGateway(config: GatewayConfig) {
 
   // --- Phase C: scheduler (delivers cron results to the originating channel) ---
   const byId = new Map(adapters.map((a) => [a.id, a]))
-  const scheduler = createScheduler({
-    runPrompt: engine.runPrompt,
-    deliver: async (channelId, conversationId, text) => {
-      const adapter = byId.get(channelId)
-      if (adapter?.deliver) await adapter.deliver(conversationId, text)
-      else engine.context.log("cron", `channel ${channelId} can't deliver (no adapter.deliver)`)
-    },
-    log: engine.context.log,
-  })
+  const deliver = async (channelId: string, conversationId: string, text: string) => {
+    const adapter = byId.get(channelId)
+    if (adapter?.deliver) await adapter.deliver(conversationId, text)
+    else engine.context.log("deliver", `channel ${channelId} can't deliver (no adapter.deliver)`)
+  }
+  const deliverVoice = async (channelId: string, conversationId: string, audio: Uint8Array) => {
+    const adapter = byId.get(channelId)
+    if (adapter?.deliverVoice) await adapter.deliverVoice(conversationId, audio)
+    else engine.context.log("deliver", `channel ${channelId} can't deliver voice`)
+  }
+  const scheduler = createScheduler({ runPrompt: engine.runPrompt, deliver, log: engine.context.log })
   engine.setScheduler(scheduler)
+  engine.setDeliver(deliver) // used by the agent send_message tool
+  engine.setDeliverVoice(deliverVoice) // used by the agent say/TTS tool
   scheduler.start()
 
   const shutdown = () => {

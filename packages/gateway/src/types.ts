@@ -110,6 +110,8 @@ export interface ChannelAdapter {
    * unsolicited messages omits it.
    */
   deliver?(conversationId: string, text: string): Promise<void>
+  /** Outbound voice/audio to a conversation (used by the say/TTS agent tool). */
+  deliverVoice?(conversationId: string, audio: Uint8Array): Promise<void>
 }
 
 /** Factory: builds an adapter from its per-channel config block. */

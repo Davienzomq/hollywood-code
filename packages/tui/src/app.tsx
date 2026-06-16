@@ -873,9 +873,13 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           // the project's opencode.json. opencode loads MCP at boot, so a restart
           // is needed for the change to take effect — same as the gateway reboot.
           const imageMcp = fileURLToPath(new URL("../../gateway/bin/hollycode-image-mcp.ts", import.meta.url))
+          const videoMcp = fileURLToPath(new URL("../../gateway/bin/hollycode-video-mcp.ts", import.meta.url))
+          const visionMcp = fileURLToPath(new URL("../../gateway/bin/hollycode-vision-mcp.ts", import.meta.url))
           const CATALOG: Record<string, { label: string; command: string[]; needsKey?: string }> = {
             browser: { label: "Browser (Playwright)", command: ["npx", "-y", "@playwright/mcp@latest"] },
             image: { label: "Image gen (FAL.ai)", command: [process.execPath, "run", imageMcp], needsKey: "FAL_KEY" },
+            video: { label: "Video gen (FAL.ai)", command: [process.execPath, "run", videoMcp], needsKey: "FAL_KEY" },
+            vision: { label: "Vision analysis (OpenAI-compatible)", command: [process.execPath, "run", visionMcp] },
           }
           const dir = project.instance.directory() || process.cwd()
           const p = nodePath.join(dir, "opencode.json")

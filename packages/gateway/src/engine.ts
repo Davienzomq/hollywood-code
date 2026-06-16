@@ -14,7 +14,7 @@ import { type GatewayConfig, saveGatewayConfig, channel } from "./config"
 import type { SchedulerHandle } from "./scheduler"
 import { createTranscriber, createSpeaker, localSttAvailable } from "./transcription"
 import { openRecallIndex } from "./search"
-import { installAgentCronTool, processAgentCronInbox } from "./agent-cron"
+import { installAgentTools, processAgentInbox } from "./agent-cron"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -88,6 +88,8 @@ export async function createEngine(config: GatewayConfig): Promise<{
   stop: () => void
   runPrompt: (channelId: string, conversationId: string, text: string) => Promise<string>
   setScheduler: (s: SchedulerHandle) => void
+  setDeliver: (d: (channelId: string, conversationId: string, text: string) => Promise<void>) => void
+  setDeliverVoice: (d: (channelId: string, conversationId: string, audio: Uint8Array) => Promise<void>) => void
 }> {
   let DIRECTORY = config.directory || process.cwd()
 
@@ -103,6 +105,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
   // Phase C: injected by the gateway after adapters exist, so /schedule works.
   let scheduler: SchedulerHandle | undefined
+  // Injected by the gateway: deliver text to a chat (used by the send_message tool).
+  let deliver: ((channelId: string, conversationId: string, text: string) => Promise<void>) | undefined
+  // Injected by the gateway: deliver voice/audio to a chat (used by the say/TTS tool).
+  let deliverVoice: ((channelId: string, conversationId: string, audio: Uint8Array) => Promise<void>) | undefined
 
   // --- Session persistence (keyed by "channelId:conversationId") -----------
   const STORE = path.join(os.homedir(), ".hollywood-gateway-sessions.json")
@@ -148,6 +154,8 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // in opencode.jsonc so their tools show up natively to the model. Toggled via
   // /tools. The browser (Playwright MCP) is free and local — on by default.
   const imageMcpPath = fileURLToPath(new URL("../bin/hollycode-image-mcp.ts", import.meta.url))
+  const videoMcpPath = fileURLToPath(new URL("../bin/hollycode-video-mcp.ts", import.meta.url))
+  const visionMcpPath = fileURLToPath(new URL("../bin/hollycode-vision-mcp.ts", import.meta.url))
   const MCP_CATALOG: Record<string, { label: string; type: "local"; command: string[]; needsKey?: string }> = {
     browser: {
       label: "Browser (Playwright) — navigate, click, read live pages",
@@ -160,9 +168,20 @@ export async function createEngine(config: GatewayConfig): Promise<{
       command: [process.execPath, "run", imageMcpPath],
       needsKey: "FAL_KEY",
     },
+    video: {
+      label: "Video generation (FAL.ai) — needs FAL_KEY in the environment",
+      type: "local",
+      command: [process.execPath, "run", videoMcpPath],
+      needsKey: "FAL_KEY",
+    },
+    vision: {
+      label: "Vision analysis (OpenAI-compatible) — needs VISION_API_KEY or OPENAI_API_KEY",
+      type: "local",
+      command: [process.execPath, "run", visionMcpPath],
+    },
   }
-  // browser is free/local → on by default; image needs a FAL key → off by default.
-  const toolsEnabled: Record<string, boolean> = { browser: true, image: false, ...(config.tools ?? {}) }
+  // browser is free/local → on by default; image/video/vision need an API key → off by default.
+  const toolsEnabled: Record<string, boolean> = { browser: true, image: false, video: false, vision: false, ...(config.tools ?? {}) }
 
   const applyMcpConfig = () => {
     try {
@@ -181,9 +200,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
   }
   applyMcpConfig()
 
-  // Install the agent-facing `cronjob` tool so the agent can schedule tasks when
-  // asked in natural language (the gateway watches its inbox below).
-  installAgentCronTool()
+  // Install the agent-facing tools (cronjob, recall, send_message, memory) so the
+  // agent can use them when asked in natural language (the gateway watches their
+  // inbox below). `memory` is self-contained and also works in the TUI.
+  installAgentTools()
 
   // --- Boot server ----------------------------------------------------------
   log("engine", "Starting Hollywood Code server...")
@@ -442,7 +462,15 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // create/list/remove the job on the (gateway-owned) scheduler.
   const cronInboxTimer = setInterval(() => {
     try {
-      processAgentCronInbox({ scheduler, chatForSession, log })
+      processAgentInbox({
+        scheduler,
+        recall,
+        chatForSession,
+        deliver,
+        deliverVoice,
+        speak: speaker ? (t: string) => speaker!.synthesize(t) : undefined,
+        log,
+      })
     } catch {
       /* best-effort */
     }
@@ -1483,5 +1511,13 @@ export async function createEngine(config: GatewayConfig): Promise<{
     scheduler = s
   }
 
-  return { context, stop, runPrompt, setScheduler }
+  const setDeliver = (d: (channelId: string, conversationId: string, text: string) => Promise<void>) => {
+    deliver = d
+  }
+
+  const setDeliverVoice = (d: (channelId: string, conversationId: string, audio: Uint8Array) => Promise<void>) => {
+    deliverVoice = d
+  }
+
+  return { context, stop, runPrompt, setScheduler, setDeliver, setDeliverVoice }
 }
