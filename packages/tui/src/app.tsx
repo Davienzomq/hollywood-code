@@ -41,6 +41,7 @@ import { useConnected } from "./component/use-connected"
 import { DialogMcp } from "./component/dialog-mcp"
 import { DialogStatus } from "./component/dialog-status"
 import { DialogThemeList } from "./component/dialog-theme-list"
+import { DialogOnboarding, onboardingDone } from "./component/dialog-onboarding"
 import { DialogHelp } from "./ui/dialog-help"
 import { DialogAgent } from "./component/dialog-agent"
 import { DialogSessionList } from "./component/dialog-session-list"
@@ -487,6 +488,14 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         })
       }
     })
+  })
+
+  // First-run onboarding: open the guided setup once, on a fresh install.
+  onMount(() => {
+    if (onboardingDone()) return
+    setTimeout(() => {
+      if (dialog.stack.length === 0) dialog.replace(() => <DialogOnboarding />)
+    }, 400)
   })
 
   let continued = false
@@ -1000,6 +1009,16 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           if (want !== "on" && want !== "off") return
           const out = runFlag(want === "on" ? "--install-startup" : "--remove-startup")
           DialogAlert.show(dialog, "Auto-start", out || `Auto-start ${want === "on" ? "enabled" : "disabled"}.`)
+        },
+      },
+      {
+        name: "hollycode.setup",
+        title: "Setup / onboarding (choose tools)",
+        slashName: "setup",
+        slashAliases: ["onboarding", "onboard"],
+        category: "System",
+        run: () => {
+          dialog.replace(() => <DialogOnboarding />)
         },
       },
       {

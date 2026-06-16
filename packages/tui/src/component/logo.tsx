@@ -551,7 +551,11 @@ function buildIdleState(t: number, ctx: LogoContext): IdleState {
   return { cfg, reach, rings, active }
 }
 
-export function Logo(props: { shape?: LogoShape; ink?: RGBA; idle?: boolean } = {}) {
+// Hollycode brand orange — used for the "HOLLY" half of the wordmark and as the
+// selection highlight in the onboarding wizard.
+export const ACCENT_ORANGE = RGBA.fromInts(255, 149, 0)
+
+export function Logo(props: { shape?: LogoShape; ink?: RGBA; leftInk?: RGBA; idle?: boolean } = {}) {
   const ctx = props.shape ? build(props.shape) : DEFAULT
   const { theme } = useTheme()
   const renderer = useRenderer()
@@ -857,7 +861,16 @@ export function Logo(props: { shape?: LogoShape; ink?: RGBA; idle?: boolean } = 
         {(line, index) => (
           <box flexDirection="row" gap={1}>
             <box flexDirection="row">
-              {renderLine(line, index(), props.ink ?? theme.textMuted, !!props.ink, 0, frame(), dusk(), idleState())}
+              {renderLine(
+                line,
+                index(),
+                props.leftInk ?? props.ink ?? theme.textMuted,
+                !!(props.leftInk ?? props.ink),
+                0,
+                frame(),
+                dusk(),
+                idleState(),
+              )}
             </box>
             <box flexDirection="row">
               {renderLine(
