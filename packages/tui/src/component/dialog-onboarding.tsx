@@ -46,7 +46,7 @@ const TOOL_ROWS: ToolRow[] = [
   { id: "files", label: "File Operations (read, write, patch, search)", icon: "📁", kind: "on" },
   { id: "code", label: "Code Execution (execute_code)", icon: "⚡", kind: "on" },
   { id: "vision", label: "Vision / Image Analysis", icon: "👁", kind: "mcp", needsKey: "VISION_API_KEY" },
-  { id: "video_analyze", label: "Video Analysis (requires video-capable model)", icon: "🎞", kind: "off" },
+  { id: "videoanalyze", label: "Video Analysis (frames + vision)", icon: "🎞", kind: "mcp", needsKey: "VISION_API_KEY" },
   { id: "image", label: "Image Generation", icon: "🎨", kind: "mcp", needsKey: "FAL_KEY" },
   { id: "video", label: "Video Generation (text-to-video)", icon: "🎬", kind: "mcp", needsKey: "FAL_KEY" },
   { id: "x_search", label: "X (Twitter) Search (requires xAI key)", icon: "𝕏", kind: "off" },
@@ -55,18 +55,27 @@ const TOOL_ROWS: ToolRow[] = [
   { id: "skills", label: "Skills (list, view, manage)", icon: "📚", kind: "on" },
   { id: "todo", label: "Task Planning (todo)", icon: "📋", kind: "on" },
   { id: "memory", label: "Memory (persistent across sessions)", icon: "🧠", kind: "on" },
-  { id: "context_engine", label: "Context Engine", icon: "✳", kind: "off" },
+  { id: "context_engine", label: "Context Engine (runtime tools — provided by our MCP + skills system)", icon: "✳", kind: "on" },
   { id: "session_search", label: "Session Search (search past conversations)", icon: "🔍", kind: "on" },
   { id: "clarify", label: "Clarifying Questions (clarify)", icon: "❓", kind: "on" },
   { id: "delegate", label: "Task Delegation (delegate_task)", icon: "🤝", kind: "on" },
   { id: "cron", label: "Cron Jobs (create/list/update/remove)", icon: "⏰", kind: "on" },
   { id: "send_message", label: "Cross-Platform Messaging (send_message)", icon: "✉", kind: "on" },
-  { id: "home_assistant", label: "Home Assistant (smart home control)", icon: "🏠", kind: "off" },
-  { id: "spotify", label: "Spotify (playback, search, playlists)", icon: "🎵", kind: "off" },
+  { id: "homeassistant", label: "Home Assistant (smart home control)", icon: "🏠", kind: "mcp", needsKey: "HA_TOKEN" },
+  { id: "spotify", label: "Spotify (playback, search, playlists)", icon: "🎵", kind: "mcp", needsKey: "SPOTIFY_TOKEN" },
   { id: "yuanbao", label: "Yuanbao (group info, DM)", icon: "💬", kind: "off" },
-  { id: "computer_use", label: "Computer Use (desktop control)", icon: "🖥", kind: "off" },
+  { id: "computeruse", label: "Computer Use (desktop control)", icon: "🖥", kind: "mcp" },
 ]
-const MCP_COMMAND_KEY: Record<string, string> = { browser: "browser", image: "image", video: "video", vision: "vision" }
+const MCP_COMMAND_KEY: Record<string, string> = {
+  browser: "browser",
+  image: "image",
+  video: "video",
+  vision: "vision",
+  videoanalyze: "videoanalyze",
+  computeruse: "computeruse",
+  homeassistant: "homeassistant",
+  spotify: "spotify",
+}
 
 export function DialogOnboarding() {
   const dialog = useDialog()
@@ -79,14 +88,16 @@ export function DialogOnboarding() {
   // --- tool config (writes the project opencode.json mcp block) ---
   const dir = project.instance.directory() || process.cwd()
   const cfgPath = nodePath.join(dir, "opencode.json")
-  const imageMcp = fileURLToPath(new URL("../../gateway/bin/hollycode-image-mcp.ts", import.meta.url))
-  const videoMcp = fileURLToPath(new URL("../../gateway/bin/hollycode-video-mcp.ts", import.meta.url))
-  const visionMcp = fileURLToPath(new URL("../../gateway/bin/hollycode-vision-mcp.ts", import.meta.url))
+  const mcpBin = (name: string) => fileURLToPath(new URL(`../../gateway/bin/hollycode-${name}-mcp.ts`, import.meta.url))
   const command: Record<string, string[]> = {
     browser: ["npx", "-y", "@playwright/mcp@latest"],
-    image: [process.execPath, "run", imageMcp],
-    video: [process.execPath, "run", videoMcp],
-    vision: [process.execPath, "run", visionMcp],
+    image: [process.execPath, "run", mcpBin("image")],
+    video: [process.execPath, "run", mcpBin("video")],
+    vision: [process.execPath, "run", mcpBin("vision")],
+    videoanalyze: [process.execPath, "run", mcpBin("videoanalyze")],
+    computeruse: [process.execPath, "run", mcpBin("computeruse")],
+    homeassistant: [process.execPath, "run", mcpBin("homeassistant")],
+    spotify: [process.execPath, "run", mcpBin("spotify")],
   }
   const readCfg = (): any => {
     try {
@@ -95,11 +106,16 @@ export function DialogOnboarding() {
     return { $schema: "https://opencode.ai/config.json" }
   }
   const init = readCfg()
+  const isOn = (id: string) => !!init?.mcp?.[id] && init.mcp[id].enabled !== false
   const [mcp, setMcp] = createStore<Record<string, boolean>>({
     browser: init?.mcp?.browser ? init.mcp.browser.enabled !== false : true,
-    image: !!init?.mcp?.image && init.mcp.image.enabled !== false,
-    video: !!init?.mcp?.video && init.mcp.video.enabled !== false,
-    vision: !!init?.mcp?.vision && init.mcp.vision.enabled !== false,
+    image: isOn("image"),
+    video: isOn("video"),
+    vision: isOn("vision"),
+    videoanalyze: isOn("videoanalyze"),
+    computeruse: isOn("computeruse"),
+    homeassistant: isOn("homeassistant"),
+    spotify: isOn("spotify"),
   })
   const saveTools = () => {
     const raw = readCfg()

@@ -153,9 +153,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // The opencode core already speaks MCP; we just register well-known servers
   // in opencode.jsonc so their tools show up natively to the model. Toggled via
   // /tools. The browser (Playwright MCP) is free and local — on by default.
-  const imageMcpPath = fileURLToPath(new URL("../bin/hollycode-image-mcp.ts", import.meta.url))
-  const videoMcpPath = fileURLToPath(new URL("../bin/hollycode-video-mcp.ts", import.meta.url))
-  const visionMcpPath = fileURLToPath(new URL("../bin/hollycode-vision-mcp.ts", import.meta.url))
+  const mcpBin = (name: string) => fileURLToPath(new URL(`../bin/hollycode-${name}-mcp.ts`, import.meta.url))
+  const imageMcpPath = mcpBin("image")
+  const videoMcpPath = mcpBin("video")
+  const visionMcpPath = mcpBin("vision")
   const MCP_CATALOG: Record<string, { label: string; type: "local"; command: string[]; needsKey?: string }> = {
     browser: {
       label: "Browser (Playwright) — navigate, click, read live pages",
@@ -179,9 +180,41 @@ export async function createEngine(config: GatewayConfig): Promise<{
       type: "local",
       command: [process.execPath, "run", visionMcpPath],
     },
+    videoanalyze: {
+      label: "Video analysis (frames + vision) — needs VISION_API_KEY or OPENAI_API_KEY + ffmpeg",
+      type: "local",
+      command: [process.execPath, "run", mcpBin("videoanalyze")],
+    },
+    computeruse: {
+      label: "Computer use (desktop control via Python/pyautogui)",
+      type: "local",
+      command: [process.execPath, "run", mcpBin("computeruse")],
+    },
+    homeassistant: {
+      label: "Home Assistant (smart-home control) — needs HA_URL + HA_TOKEN",
+      type: "local",
+      command: [process.execPath, "run", mcpBin("homeassistant")],
+      needsKey: "HA_TOKEN",
+    },
+    spotify: {
+      label: "Spotify (playback, search, playlists) — needs SPOTIFY_TOKEN",
+      type: "local",
+      command: [process.execPath, "run", mcpBin("spotify")],
+      needsKey: "SPOTIFY_TOKEN",
+    },
   }
-  // browser is free/local → on by default; image/video/vision need an API key → off by default.
-  const toolsEnabled: Record<string, boolean> = { browser: true, image: false, video: false, vision: false, ...(config.tools ?? {}) }
+  // browser is free/local → on by default; the rest need a key/setup → off by default.
+  const toolsEnabled: Record<string, boolean> = {
+    browser: true,
+    image: false,
+    video: false,
+    vision: false,
+    videoanalyze: false,
+    computeruse: false,
+    homeassistant: false,
+    spotify: false,
+    ...(config.tools ?? {}),
+  }
 
   const applyMcpConfig = () => {
     try {
