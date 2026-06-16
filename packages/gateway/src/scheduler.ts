@@ -64,6 +64,14 @@ export function createScheduler(deps: SchedulerDeps): SchedulerHandle {
     deps.log("cron", `firing job ${job.id}: ${job.prompt.slice(0, 60)}`)
     try {
       const result = await deps.runPrompt(job.channelId, job.conversationId, job.prompt)
+      // Heartbeat / watchdog pattern: a job whose agent reports nothing (empty or
+      // "NOOP") stays silent — nothing is delivered. Lets a recurring job act as a
+      // quiet heartbeat that only pings when there's actually something to say.
+      const trimmed = result.trim()
+      if (!trimmed || /^noop\b/i.test(trimmed)) {
+        deps.log("cron", `job ${job.id} reported nothing — staying silent`)
+        return
+      }
       const text = `⏰ Scheduled: ${job.prompt}\n\n${result}`.trim()
       await deps.deliver(job.channelId, job.conversationId, text)
     } catch (err: any) {

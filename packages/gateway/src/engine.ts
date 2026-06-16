@@ -14,6 +14,7 @@ import { type GatewayConfig, saveGatewayConfig, channel } from "./config"
 import type { SchedulerHandle } from "./scheduler"
 import { createTranscriber, createSpeaker, localSttAvailable } from "./transcription"
 import { openRecallIndex } from "./search"
+import { installAgentCronTool, processAgentCronInbox } from "./agent-cron"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -179,6 +180,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
     }
   }
   applyMcpConfig()
+
+  // Install the agent-facing `cronjob` tool so the agent can schedule tasks when
+  // asked in natural language (the gateway watches its inbox below).
+  installAgentCronTool()
 
   // --- Boot server ----------------------------------------------------------
   log("engine", "Starting Hollywood Code server...")
@@ -420,6 +425,28 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
   const currentSession = (channelId: string, conversationId: string) =>
     sessionMap.get(sessionKey(channelId, conversationId))
+
+  // Reverse of sessionMap: find which chat a session belongs to (used by the
+  // agent cron tool to deliver scheduled jobs back to the right conversation).
+  const chatForSession = (sid: string) => {
+    for (const [key, value] of sessionMap) {
+      if (value === sid) {
+        const i = key.indexOf(":")
+        return { channelId: key.slice(0, i), conversationId: key.slice(i + 1) }
+      }
+    }
+    return undefined
+  }
+
+  // Watch the agent cron inbox: when the agent's cronjob tool files a request,
+  // create/list/remove the job on the (gateway-owned) scheduler.
+  const cronInboxTimer = setInterval(() => {
+    try {
+      processAgentCronInbox({ scheduler, chatForSession, log })
+    } catch {
+      /* best-effort */
+    }
+  }, 2000)
 
   const syncModelToFile = (model: string) => {
     try {
@@ -1442,6 +1469,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
   const stop = () => {
     clearInterval(reconciler)
     clearInterval(curatorTimer)
+    clearInterval(cronInboxTimer)
     recall.close()
     eventAbort.abort()
     if (serverProc) {
