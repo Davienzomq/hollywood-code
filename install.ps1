@@ -48,6 +48,11 @@ Push-Location $DEST
 & $BUN_EXE install
 Pop-Location
 
+# 3b. Renamed runtime — a copy of the Bun runtime named hollycode.exe, so the
+# gateway AND the opencode server it spawns (via process.execPath) both show as
+# "hollycode.exe" in Task Manager instead of the generic "bun.exe".
+Copy-Item $BUN_EXE (Join-Path $DEST "hollycode.exe") -Force
+
 # 4. Launchers on PATH
 Write-Step "Creating launchers in $BUN_BIN..."
 New-Item -ItemType Directory -Force -Path $BUN_BIN | Out-Null
@@ -59,9 +64,9 @@ rem JSX runtime, and passes your current folder as the project.
 set "HOLLY_PROJ=%CD%"
 pushd "%USERPROFILE%\.hollycode\packages\opencode"
 if "%~1"=="" (
-  "%USERPROFILE%\.bun\bin\bun.exe" run --conditions=browser .\src\index.ts "%HOLLY_PROJ%"
+  "%USERPROFILE%\.hollycode\hollycode.exe" run --conditions=browser .\src\index.ts "%HOLLY_PROJ%"
 ) else (
-  "%USERPROFILE%\.bun\bin\bun.exe" run --conditions=browser .\src\index.ts %*
+  "%USERPROFILE%\.hollycode\hollycode.exe" run --conditions=browser .\src\index.ts %*
 )
 popd
 "@
@@ -70,8 +75,9 @@ Set-Content -Path (Join-Path $BUN_BIN "hollycode.cmd") -Value $hollycode -Encodi
 $remote = @"
 @echo off
 rem Hollycode — Remote Control (multi-channel gateway). First run: setup wizard.
+rem Uses the renamed runtime so the gateway + spawned server show as hollycode.exe.
 set "HOLLY_PROJ=%CD%"
-"%USERPROFILE%\.bun\bin\bun.exe" run "%USERPROFILE%\.hollycode\packages\gateway\bin\hollycode-gateway.ts" --directory "%HOLLY_PROJ%" %*
+"%USERPROFILE%\.hollycode\hollycode.exe" run "%USERPROFILE%\.hollycode\packages\gateway\bin\hollycode-gateway.ts" --directory "%HOLLY_PROJ%" %*
 "@
 Set-Content -Path (Join-Path $BUN_BIN "hollycode-remote.cmd") -Value $remote -Encoding ASCII
 

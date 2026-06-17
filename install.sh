@@ -39,6 +39,12 @@ step "Installing dependencies (this can take a minute)..."
 (cd "$DEST" && "$BUN" install)
 (cd "$DEST" && "$BUN" install)
 
+# 3b. Renamed runtime — a copy of the Bun runtime named "hollycode", so the
+# gateway AND the opencode server it spawns (via process.execPath) both show as
+# "hollycode" in process listings instead of the generic "bun".
+RUNTIME="$DEST/hollycode"
+cp "$BUN" "$RUNTIME" && chmod +x "$RUNTIME"
+
 # 4. Launchers
 step "Creating launchers in $BUN_BIN..."
 mkdir -p "$BUN_BIN"
@@ -49,9 +55,9 @@ cat > "$BUN_BIN/hollycode" <<EOF
 HOLLY_PROJ="\$(pwd)"
 cd "\$HOME/.hollycode/packages/opencode"
 if [ \$# -eq 0 ]; then
-  exec "$BUN" run --conditions=browser ./src/index.ts "\$HOLLY_PROJ"
+  exec "$RUNTIME" run --conditions=browser ./src/index.ts "\$HOLLY_PROJ"
 else
-  exec "$BUN" run --conditions=browser ./src/index.ts "\$@"
+  exec "$RUNTIME" run --conditions=browser ./src/index.ts "\$@"
 fi
 EOF
 chmod +x "$BUN_BIN/hollycode"
@@ -59,8 +65,9 @@ chmod +x "$BUN_BIN/hollycode"
 cat > "$BUN_BIN/hollycode-remote" <<EOF
 #!/usr/bin/env bash
 # Hollycode — Remote Control (multi-channel gateway). First run: setup wizard.
+# Uses the renamed runtime so the gateway + spawned server show as "hollycode".
 HOLLY_PROJ="\$(pwd)"
-exec "$BUN" run "\$HOME/.hollycode/packages/gateway/bin/hollycode-gateway.ts" --directory "\$HOLLY_PROJ" "\$@"
+exec "$RUNTIME" run "\$HOME/.hollycode/packages/gateway/bin/hollycode-gateway.ts" --directory "\$HOLLY_PROJ" "\$@"
 EOF
 chmod +x "$BUN_BIN/hollycode-remote"
 
