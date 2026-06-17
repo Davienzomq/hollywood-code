@@ -103,6 +103,29 @@ export const layer = Layer.effect(
 
         const list = yield* skill.available(agent)
 
+        // Lazy listing for large skill libraries. A full verbose listing of every
+        // skill's description can cost tens of thousands of tokens in EVERY session
+        // (e.g. a global ~/.config/opencode/skills library with 150+ skills). Past a
+        // threshold, inject only the skill NAMES plus a pointer to the skill_search
+        // tool, which surfaces descriptions on demand. Small sets keep the richer
+        // verbose listing (better recall, negligible cost).
+        const LAZY_SKILL_THRESHOLD = 25
+        const described = list.filter((s) => s.description !== undefined)
+        if (described.length > LAZY_SKILL_THRESHOLD) {
+          return [
+            "Skills provide specialized instructions and workflows for specific tasks.",
+            `${described.length} skills are available. To save context, their full descriptions are NOT listed here.`,
+            "Use the skill_search tool with keywords from the task to find relevant skills and read their descriptions,",
+            "then use the skill tool to load one by its exact name.",
+            "",
+            "Available skill names:",
+            described
+              .toSorted((a, b) => a.name.localeCompare(b.name))
+              .map((s) => `- ${s.name}`)
+              .join("\n"),
+          ].join("\n")
+        }
+
         return [
           "Skills provide specialized instructions and workflows for specific tasks.",
           "Use the skill tool to load a skill when a task matches its description.",

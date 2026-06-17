@@ -1,0 +1,5 @@
+Search the available skills by keyword to discover ones relevant to the current task.
+
+The system prompt lists skill NAMES but not their full descriptions (to save context). Use this tool with keywords from the task to retrieve the matching skills' descriptions and locations, then use the `skill` tool to load a skill by its exact name.
+
+Provide specific keywords (e.g. "pdf extract", "git commit", "react component"). Returns up to 20 best matches, ranked by relevance.
