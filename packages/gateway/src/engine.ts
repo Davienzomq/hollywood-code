@@ -1935,9 +1935,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
         const pct = contextLimit ? Math.round((totalTokens / contextLimit) * 100) : undefined
         const barLen = 20
-        const bar = pct != null
-          ? "[" + "█".repeat(Math.round((pct / 100) * barLen)) + "░".repeat(barLen - Math.round((pct / 100) * barLen)) + "]"
-          : ""
+        // Clamp filled segments to [0, barLen] — when usage exceeds the limit
+        // (pct > 100) an unclamped count makes "░".repeat(negative) throw.
+        const filled = pct != null ? Math.max(0, Math.min(barLen, Math.round((pct / 100) * barLen))) : 0
+        const bar = pct != null ? "[" + "█".repeat(filled) + "░".repeat(barLen - filled) + "]" : ""
 
         const lines2 = [
           `📊 Context window — ${sid.slice(0, 12)}…`,
