@@ -1175,6 +1175,115 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           dialog.replace(() => <DialogOnboarding />)
         },
       },
+      // ── /doctor — install health check ──
+      {
+        name: "hollycode.doctor",
+        title: "Doctor — diagnose the installation",
+        slashName: "doctor",
+        category: "System",
+        run: async () => {
+          const home = os.homedir()
+          const checks: { label: string; ok: boolean }[] = []
+
+          // 1. hollycode executable
+          const hollycodeExe = nodePath.join(home, ".hollycode", "hollycode.exe")
+          const hollycodeAlt = nodePath.join(home, ".hollycode", "hollycode")
+          checks.push({
+            label: "hollycode.exe in ~/.hollycode",
+            ok: existsSync(hollycodeExe) || existsSync(hollycodeAlt),
+          })
+
+          // 2. launcher in ~/.bun/bin
+          const bunBin = nodePath.join(home, ".bun", "bin", "hollycode")
+          const bunBinExe = nodePath.join(home, ".bun", "bin", "hollycode.exe")
+          checks.push({
+            label: "launcher in ~/.bun/bin",
+            ok: existsSync(bunBin) || existsSync(bunBinExe),
+          })
+
+          // 3. @opentui/solid node_modules
+          const opentui = nodePath.join(home, ".hollycode", "node_modules", "@opentui", "solid")
+          checks.push({
+            label: "@opentui/solid in ~/.hollycode/node_modules",
+            ok: existsSync(opentui),
+          })
+
+          // 4. opencode auth
+          const authPaths = [
+            nodePath.join(home, ".local", "share", "opencode", "auth.json"),
+            nodePath.join(home, ".local", "share", "opencode", "account.json"),
+            nodePath.join(home, "AppData", "Roaming", "opencode", "auth.json"),
+            nodePath.join(home, "AppData", "Roaming", "opencode", "account.json"),
+          ]
+          checks.push({
+            label: "opencode auth file exists",
+            ok: authPaths.some((p) => existsSync(p)),
+          })
+
+          // 5. server reachable (we're already connected — check providers config)
+          let serverOk = false
+          try {
+            const res = await sdk.client.config.providers().catch(() => null)
+            serverOk = res != null
+          } catch { /* offline */ }
+          checks.push({ label: "opencode server reachable", ok: serverOk })
+
+          const lines = checks.map((c) => `${c.ok ? "✅" : "⚠️"} ${c.label}`)
+          const allOk = checks.every((c) => c.ok)
+          DialogAlert.show(
+            dialog,
+            "Doctor — install health",
+            `${lines.join("\n")}\n\n${allOk ? "Everything looks good!" : "Some checks failed — see above."}`,
+          )
+        },
+      },
+      // ── /permissions — view/edit per-tool permission rules ──
+      {
+        name: "hollycode.permissions",
+        title: "Permissions — view/edit tool permission rules",
+        slashName: "permissions",
+        slashAliases: ["perm", "perms"],
+        category: "System",
+        run: async () => {
+          const TOOLS = ["bash", "edit", "write", "read", "webfetch", "external_directory"] as const
+          type PermValue = "allow" | "ask" | "deny"
+          const dir = project.instance.directory() || process.cwd()
+          const p = nodePath.join(dir, "opencode.json")
+
+          // Read current config
+          let raw: any = { $schema: "https://opencode.ai/config.json" }
+          try { if (existsSync(p)) raw = JSON.parse(readFileSync(p, "utf8").replace(/^﻿/, "")) } catch { /* new */ }
+          const perm: Record<string, PermValue> = typeof raw.permission === "object" && raw.permission !== null
+            ? raw.permission as Record<string, PermValue>
+            : {}
+
+          const currentState = TOOLS.map((t) => `${t}=${perm[t] ?? "ask"}`).join("  ")
+          const choice = await DialogPrompt.show(
+            dialog,
+            `Permissions: ${currentState}\nType "<tool> allow|ask|deny" to change (e.g. bash allow)`,
+            { placeholder: "bash allow" },
+          )
+          if (!choice) return
+
+          const parts = choice.trim().toLowerCase().split(/\s+/).filter(Boolean)
+          const tool = parts[0] as typeof TOOLS[number]
+          const want = parts[1] as PermValue | undefined
+
+          if (!tool || !(TOOLS as readonly string[]).includes(tool) || !["allow", "ask", "deny"].includes(want ?? "")) {
+            if (choice) toast.show({ message: `Usage: <tool> allow|ask|deny — tools: ${TOOLS.join(", ")}`, variant: "info" })
+            return
+          }
+
+          raw.permission = { ...perm, [tool]: want }
+          try {
+            writeFileSync(p, JSON.stringify(raw, null, 2))
+            toast.show({ message: `${tool} → ${want} (saved to opencode.json)`, variant: "success" })
+          } catch (e: any) {
+            toast.show({ message: `Could not write opencode.json: ${e?.message ?? e}`, variant: "error" })
+          }
+          dialog.clear()
+        },
+      },
       {
         name: "theme.switch",
         title: "Switch theme",

@@ -46,6 +46,7 @@ import { useEditorContext } from "../../context/editor"
 import { openEditor } from "../../editor"
 import { useDialog } from "../../ui/dialog"
 import { DialogAlert } from "../../ui/dialog-alert"
+import { DialogPrompt } from "../../ui/dialog-prompt"
 import { TodoItem } from "../../component/todo-item"
 import { DialogMessage } from "./dialog-message"
 import type { PromptInfo } from "../../component/prompt/history"
@@ -1195,6 +1196,132 @@ export function Session() {
         toast.show({ message: "Initializing AGENTS.md…", variant: "info" })
         await sdk.client.session.init({ sessionID: route.sessionID }).catch(() => {})
         toast.show({ message: "AGENTS.md initialized", variant: "success" })
+        dialog.clear()
+      },
+    },
+    // ── /context — show context-window usage ──
+    {
+      title: "Context — show context-window usage",
+      value: "hollycode.context",
+      category: "Session",
+      slash: {
+        name: "context",
+        aliases: ["ctx", "tokens"],
+      },
+      run: () => {
+        const msgs = messages()
+        // Find the last assistant message with actual output tokens (mirrors sidebar/context.tsx)
+        const last = msgs.findLast(
+          (m): m is AssistantMessage => m.role === "assistant" && (m as AssistantMessage).tokens.output > 0,
+        )
+
+        if (!last) {
+          toast.show({ message: "No assistant messages with token data yet", variant: "info" })
+          dialog.clear()
+          return
+        }
+
+        const t = last.tokens
+        const total = t.input + t.output + t.reasoning + t.cache.read + t.cache.write
+        const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+        const limit = model?.limit?.context ?? 0
+        const pct = limit > 0 ? Math.round((total / limit) * 100) : null
+        const cost = session()?.cost ?? 0
+
+        const fmt = (n: number) => n.toLocaleString()
+        const lines = [
+          `Input:       ${fmt(t.input)}`,
+          `Output:      ${fmt(t.output)}`,
+          `Reasoning:   ${fmt(t.reasoning)}`,
+          `Cache read:  ${fmt(t.cache.read)}`,
+          `Cache write: ${fmt(t.cache.write)}`,
+          `─────────────────────────`,
+          `Total used:  ${fmt(total)}${limit > 0 ? ` / ${fmt(limit)}` : ""}`,
+          pct != null ? `Used:        ${pct}%` : null,
+          `Cost so far: $${cost.toFixed(4)}`,
+          `Model:       ${last.providerID}/${last.modelID}`,
+        ].filter(Boolean) as string[]
+
+        DialogAlert.show(dialog, "Context-window usage", lines.join("\n"))
+      },
+    },
+    // ── /rewind — pick a past user message and revert to it ──
+    {
+      title: "Rewind — pick a past message and roll back to it",
+      value: "hollycode.rewind",
+      category: "Session",
+      slash: {
+        name: "rewind",
+        aliases: ["rollback"],
+      },
+      run: async () => {
+        const revert = session()?.revert?.messageID
+        // Collect all visible user messages (not past the active revert point)
+        const userMsgs = messages().filter(
+          (m) => m.role === "user" && (!revert || m.id < revert),
+        )
+        if (userMsgs.length === 0) {
+          toast.show({ message: "No user messages to rewind to", variant: "info" })
+          dialog.clear()
+          return
+        }
+
+        // Build a labelled list newest-first so the most recent is top
+        const labeled = [...userMsgs].reverse().map((m) => {
+          const parts = sync.data.part[m.id] ?? []
+          const text = parts
+            .filter((p): p is TextPart => p.type === "text" && !(p as TextPart).synthetic)
+            .map((p) => (p as TextPart).text)
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim()
+          const preview = text.length > 60 ? text.slice(0, 57) + "…" : text || "(no text)"
+          return { message: m, preview }
+        })
+
+        // Prompt: show numbered list and let user type the number
+        const listText = labeled.map((item, i) => `${i + 1}. ${item.preview}`).join("\n")
+        const choice = await DialogPrompt.show(
+          dialog,
+          `Rewind — pick a message number to roll back to:\n\n${listText}`,
+          { placeholder: "1" },
+        )
+        if (!choice) return
+
+        const idx = parseInt(choice.trim(), 10) - 1
+        if (isNaN(idx) || idx < 0 || idx >= labeled.length) {
+          toast.show({ message: `Enter a number between 1 and ${labeled.length}`, variant: "error" })
+          return
+        }
+
+        const target = labeled[idx]!.message
+        // Abort any running task first (mirrors undo logic)
+        const status = sync.data.session_status?.[route.sessionID]
+        if (status?.type !== "idle") {
+          await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
+        }
+
+        await sdk.client.session
+          .revert({ sessionID: route.sessionID, messageID: target.id })
+          .then(() => {
+            // Restore the picked message into the prompt (mirrors undo)
+            const parts = sync.data.part[target.id] ?? []
+            prompt?.set(
+              parts.reduce(
+                (agg, part) => {
+                  if (part.type === "text") {
+                    if (!(part as TextPart).synthetic) agg.input += (part as TextPart).text
+                  }
+                  if (part.type === "file") agg.parts.push(part)
+                  return agg
+                },
+                { input: "", parts: [] as PromptInfo["parts"] },
+              ),
+            )
+            toBottom()
+            toast.show({ message: `Rewound to: "${labeled[idx]!.preview}"`, variant: "success" })
+          })
+          .catch(() => toast.show({ message: "Rewind failed", variant: "error" }))
         dialog.clear()
       },
     },

@@ -958,7 +958,8 @@ export async function createEngine(config: GatewayConfig): Promise<{
             "/new · /sessions · /status · /stop · /model · /undo · /redo · /fork\n" +
             "/rename · /compact · /export · /copy · /agents · /skills\n" +
             "/review · /init · /share · /unshare · /move · /thinking\n" +
-            "/variants · /autostart · /org · /help",
+            "/variants · /autostart · /org\n" +
+            "/doctor · /rewind · /permissions · /context · /help",
         )
         break
       }
@@ -983,7 +984,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
             "/redo — redo a previously undone revert\n" +
             "/variants — switch model variant (picker)\n" +
             "/autostart on|off|status — manage OS auto-start of the gateway\n" +
-            "/org — switch active Console organization\n\nSend any text to work on your project.",
+            "/org — switch active Console organization\n" +
+            "/doctor — diagnose install (bins, deps, auth, server)\n" +
+            "/rewind — roll back to a past user message (picker)\n" +
+            "/permissions [tool allow|ask|deny] — view/edit tool permissions\n" +
+            "/context — show context-window token usage for this session\n\nSend any text to work on your project.",
         )
         break
       }
@@ -1749,6 +1754,189 @@ export async function createEngine(config: GatewayConfig): Promise<{
           }
         }
         await responder.sendText(`✅ ${id} is now ${arg}.${note}`)
+        break
+      }
+
+      // --- doctor ---
+      case "doctor": {
+        const home = os.homedir()
+        const lines: string[] = ["🩺 Hollywood Code — install check\n"]
+
+        // 1. hollycode.exe exists
+        const exePath = path.join(home, ".hollycode", "hollycode.exe")
+        const exeOk = fs.existsSync(exePath)
+        lines.push(exeOk ? `✅ hollycode.exe found` : `⚠️ hollycode.exe missing at ~/.hollycode/hollycode.exe\n   Fix: re-run the installer`)
+
+        // 2. launchers in ~/.bun/bin
+        const bunBin = path.join(home, ".bun", "bin")
+        const launcherNames = ["hollycode.cmd", "hollycode", "hollycode-remote.cmd", "hollycode-remote"]
+        const foundLaunchers = launcherNames.filter((n) => fs.existsSync(path.join(bunBin, n)))
+        const launcherOk = foundLaunchers.length > 0
+        lines.push(launcherOk
+          ? `✅ launchers: ${foundLaunchers.join(", ")}`
+          : `⚠️ No launchers in ~/.bun/bin (hollycode.cmd / hollycode)\n   Fix: re-run install.ps1 or install.sh`)
+
+        // 3. deps installed
+        const depsPath = path.join(home, ".hollycode", "node_modules", "@opentui", "solid")
+        const depsOk = fs.existsSync(depsPath)
+        lines.push(depsOk ? `✅ node_modules OK` : `⚠️ Dependencies missing at ~/.hollycode/node_modules/@opentui/solid\n   Fix: cd ~/.hollycode && bun install`)
+
+        // 4. gateway config has at least one channel with a token
+        const channels = config.channels ?? []
+        const hasToken = channels.some((ch: any) => ch.token && ch.token.length > 0)
+        lines.push(hasToken ? `✅ gateway config has a channel token` : `⚠️ No channel token found in gateway config\n   Fix: add a telegram channel token to gateway.jsonc`)
+
+        // 5. opencode auth present
+        const authPaths = [
+          path.join(home, ".local", "share", "opencode", "auth.json"),
+          path.join(home, ".local", "share", "opencode", "account.json"),
+          path.join(home, ".config", "opencode", "auth.json"),
+          path.join(home, ".config", "opencode", "account.json"),
+        ]
+        const authOk = authPaths.some((p2) => fs.existsSync(p2))
+        lines.push(authOk ? `✅ opencode auth found` : `⚠️ No auth.json / account.json found\n   Fix: run hollycode auth or log in via the TUI`)
+
+        // 6. server reachable
+        let serverOk = false
+        try {
+          const r = await opencode.client.config.providers()
+          serverOk = !r.error
+        } catch { /* unreachable */ }
+        lines.push(serverOk ? `✅ server reachable` : `⚠️ Server not responding\n   Fix: /move to your project dir or restart the gateway`)
+
+        await responder.sendText(lines.join("\n"))
+        break
+      }
+
+      // --- rewind ---
+      case "rewind": {
+        if (!sid) { await responder.sendText("No active session."); break }
+        const msgs = await opencode.client.session.messages({ path: { id: sid } }).catch(() => null)
+        if (!msgs?.data) { await responder.sendText("No messages in this session."); break }
+        const userMsgs = (msgs.data as any[])
+          .filter((m: any) => (m.role ?? m.info?.role) === "user")
+          .reverse() // newest first
+          .slice(0, 8)
+        if (!userMsgs.length) { await responder.sendText("No user messages to rewind to."); break }
+        const previews = userMsgs.map((m: any) => {
+          const text: string =
+            (m.parts as any[] | undefined)
+              ?.filter((p: any) => p.type === "text")
+              .map((p: any) => String(p.text || ""))
+              .join(" ")
+              .trim() || m.text || "(no text)"
+          return text.slice(0, 55) + (text.length > 55 ? "…" : "")
+        })
+        const chosen = await responder.askQuestion({ question: "⏪ Rewind to which message?", options: previews })
+        if (!chosen) break // cancelled / timed out
+        const idx = previews.indexOf(chosen)
+        if (idx < 0) break
+        const target = userMsgs[idx]
+        const messageID: string | undefined = target?.id ?? target?.info?.id
+        if (!messageID) { await responder.sendText("⚠️ Could not identify message ID."); break }
+        await opencode.client.session.revert({ path: { id: sid }, body: { messageID } }).catch(() => {})
+        await responder.sendText(`⏪ Rewound to: "${chosen}"\nMessages after that point are now hidden. Use /redo to restore.`)
+        break
+      }
+
+      // --- permissions ---
+      case "permissions": {
+        const cfgPath = path.join(DIRECTORY, "opencode.jsonc")
+        const validActions = ["allow", "ask", "deny"] as const
+        const validTools = ["bash", "edit", "write", "read", "webfetch", "external_directory"] as const
+        type PermTool = typeof validTools[number]
+
+        if (args) {
+          const parts2 = args.trim().split(/\s+/)
+          const tool = parts2[0]?.toLowerCase() as PermTool | undefined
+          const action = parts2[1]?.toLowerCase() as typeof validActions[number] | undefined
+          if (!tool || !validTools.includes(tool as PermTool)) {
+            await responder.sendText(`Unknown tool. Valid tools: ${validTools.join(", ")}`)
+            break
+          }
+          if (!action || !validActions.includes(action)) {
+            await responder.sendText(`Unknown action. Valid: ${validActions.join(", ")}`)
+            break
+          }
+          try {
+            const raw = fs.existsSync(cfgPath) ? readJsonc(cfgPath) : { $schema: "https://opencode.ai/config.json" }
+            if (!raw.permission || typeof raw.permission !== "object") raw.permission = {}
+            raw.permission[tool] = action
+            fs.writeFileSync(cfgPath, JSON.stringify(raw, null, 2))
+            await responder.sendText(`✅ Permission set: ${tool} → ${action}\n⚠️ A server restart may be needed. Use /autoallow off|on to restart.`)
+          } catch (err: any) {
+            await responder.sendText(`⚠️ Could not update opencode.jsonc: ${err?.message ?? err}`)
+          }
+          break
+        }
+        // no args: show current permissions
+        let perm: Record<string, string> = {}
+        try {
+          if (fs.existsSync(cfgPath)) {
+            const raw = readJsonc(cfgPath)
+            perm = (raw.permission ?? {}) as Record<string, string>
+          }
+        } catch { /* ignore */ }
+        const rows = validTools.map((t) => `  ${t}: ${perm[t] ?? "(not set)"}`)
+        await responder.sendText(
+          `🔐 Tool permissions in ${cfgPath}:\n${rows.join("\n")}\n\nUsage: /permissions <tool> <allow|ask|deny>`,
+        )
+        break
+      }
+
+      // --- context ---
+      case "context": {
+        if (!sid) { await responder.sendText("No active session."); break }
+        const msgs = await opencode.client.session.messages({ path: { id: sid } }).catch(() => null)
+        if (!msgs?.data) { await responder.sendText("No messages yet."); break }
+
+        let totalInput = 0
+        let totalOutput = 0
+        let modelID: string | undefined
+        let providerID: string | undefined
+        for (const m of msgs.data as any[]) {
+          const info = m.info ?? m
+          if (info.role !== "assistant") continue
+          const t = info.tokens ?? {}
+          totalInput += (t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0)
+          totalOutput += (t.output ?? 0) + (t.reasoning ?? 0)
+          if (info.modelID) { modelID = info.modelID; providerID = info.providerID }
+        }
+        const totalTokens = totalInput + totalOutput
+
+        // Try to get the context limit from the model's metadata
+        let contextLimit: number | undefined
+        if (modelID || providerID) {
+          try {
+            const provRes = await opencode.client.config.providers()
+            const providers: any[] = (provRes.data as any)?.providers ?? []
+            const prov = providers.find((p: any) => p.id === providerID)
+            const modelEntry = prov?.models?.[modelID ?? ""]
+            contextLimit = modelEntry?.limit?.context
+          } catch { /* best-effort */ }
+        }
+
+        const pct = contextLimit ? Math.round((totalTokens / contextLimit) * 100) : undefined
+        const barLen = 20
+        const bar = pct != null
+          ? "[" + "█".repeat(Math.round((pct / 100) * barLen)) + "░".repeat(barLen - Math.round((pct / 100) * barLen)) + "]"
+          : ""
+
+        const lines2 = [
+          `📊 Context window — ${sid.slice(0, 12)}…`,
+          `  Input tokens (incl. cache): ${totalInput.toLocaleString()}`,
+          `  Output tokens (incl. reasoning): ${totalOutput.toLocaleString()}`,
+          `  Total: ${totalTokens.toLocaleString()}`,
+        ]
+        if (contextLimit) {
+          lines2.push(`  Limit: ${contextLimit.toLocaleString()}`)
+          lines2.push(`  Used: ${pct}%  ${bar}`)
+          if (pct! > 80) lines2.push(`\n⚠️ Context is getting full — consider /compact to save space.`)
+        } else {
+          lines2.push(`  (Context limit unavailable for this model — use /compact if sessions feel slow)`)
+        }
+        if (modelID) lines2.push(`  Model: ${providerID}/${modelID}`)
+        await responder.sendText(lines2.join("\n"))
         break
       }
 

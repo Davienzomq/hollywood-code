@@ -236,6 +236,8 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       "unshare", "redo", "variants", "autostart", "org",
       // CLI-only stubs — the engine replies "CLI-only" for these
       "diff", "editor", "exit", "themes", "timeline", "timestamps", "stuntdouble", "connect",
+      // Diagnostic / context commands
+      "doctor", "rewind", "permissions", "context",
     ] as const
 
     for (const cmd of commands) {
@@ -285,6 +287,10 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
         { command: "autostart", description: "Manage OS auto-start (on/off/status)" },
         { command: "org", description: "Switch active Console organization" },
         { command: "help", description: "Show all commands" },
+        { command: "doctor", description: "Diagnose install (checks bins, auth, server)" },
+        { command: "rewind", description: "Roll back to a past user message" },
+        { command: "permissions", description: "View/edit per-tool permission rules" },
+        { command: "context", description: "Show context-window token usage" },
       ])
       // Clear any stale narrower scope so the default menu we just set wins in
       // private chats too. Telegram resolves the most specific scope first, so a
