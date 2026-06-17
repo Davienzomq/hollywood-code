@@ -1082,8 +1082,34 @@ export async function createEngine(config: GatewayConfig): Promise<{
         if (!compRes.ok) {
           const msg = (compRes.error as any)?.message ?? String((compRes.error as any) ?? "unknown error")
           await responder.sendText(`⚠️ Compaction failed: ${msg} — try again, or /new for a fresh session.`)
+          break
+        }
+        // Report the real before → after so the user sees the reduction. The big input
+        // of the new summary message was a one-time read; the forward context is its
+        // output (the summary text). Compaction takes full effect on the next message.
+        const after = await opencode.client.session.messages({ path: { id: sid } }).catch(() => null)
+        const infos = ((after?.data as any[]) ?? []).map((m) => m.info ?? m)
+        const summaryMsg = [...infos].reverse().find(
+          (i) => i.role === "assistant" && (i.summary === true || i.mode === "compaction" || i.agent === "compaction"),
+        )
+        const prevTurn = [...infos]
+          .reverse()
+          .find(
+            (i) =>
+              i.role === "assistant" &&
+              (i.tokens?.output ?? 0) > 0 &&
+              !(i.summary === true || i.mode === "compaction" || i.agent === "compaction"),
+          )
+        const tk = (i: any) =>
+          i ? (i.tokens?.input ?? 0) + (i.tokens?.cache?.read ?? 0) + (i.tokens?.cache?.write ?? 0) + (i.tokens?.output ?? 0) + (i.tokens?.reasoning ?? 0) : 0
+        const before = tk(prevTurn)
+        const newBase = summaryMsg ? (summaryMsg.tokens?.output ?? 0) + (summaryMsg.tokens?.reasoning ?? 0) : 0
+        if (before > 0 && newBase > 0) {
+          await responder.sendText(
+            `✅ Session compacted — older messages summarized.\nContext: ${before.toLocaleString()} → ~${newBase.toLocaleString()} tokens (full effect on your next message). Check /context.`,
+          )
         } else {
-          await responder.sendText("✅ Session compacted — key info kept, older messages summarized.")
+          await responder.sendText("✅ Session compacted — older messages summarized. Reduced context applies on your next message; check /context.")
         }
         break
       }
@@ -1925,18 +1951,29 @@ export async function createEngine(config: GatewayConfig): Promise<{
         const msgs = await opencode.client.session.messages({ path: { id: sid } }).catch(() => null)
         if (!msgs?.data) { await responder.sendText("No messages yet."); break }
 
-        let totalInput = 0
-        let totalOutput = 0
-        let modelID: string | undefined
-        let providerID: string | undefined
-        for (const m of msgs.data as any[]) {
-          const info = m.info ?? m
-          if (info.role !== "assistant") continue
-          const t = info.tokens ?? {}
-          totalInput += (t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0)
-          totalOutput += (t.output ?? 0) + (t.reasoning ?? 0)
-          if (info.modelID) { modelID = info.modelID; providerID = info.providerID }
+        const all = (msgs.data as any[]).map((m) => m.info ?? m)
+        // Canonical context measure (mirrors opencode's sidebar/context.tsx): the LAST
+        // assistant message with real output tokens — NOT the sum of every turn. Each
+        // turn's `input` already IS the cumulative context window at that point, so
+        // summing them inflates the number and it never drops after a /compact.
+        const last = [...all].reverse().find((info) => info.role === "assistant" && (info.tokens?.output ?? 0) > 0)
+        if (!last) { await responder.sendText("No assistant messages with token data yet."); break }
+        const t = last.tokens ?? {}
+        const isSummary = last.summary === true || last.mode === "compaction" || last.agent === "compaction"
+        let totalInput: number
+        let totalOutput: number
+        if (isSummary) {
+          // Right after /compact the last assistant IS the summary message: its large
+          // `input` was a one-time read of the history being compacted. The forward
+          // context the next turn will actually carry is the summary text (its output).
+          totalInput = 0
+          totalOutput = (t.output ?? 0) + (t.reasoning ?? 0)
+        } else {
+          totalInput = (t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0)
+          totalOutput = (t.output ?? 0) + (t.reasoning ?? 0)
         }
+        const modelID: string | undefined = last.modelID
+        const providerID: string | undefined = last.providerID
         const totalTokens = totalInput + totalOutput
 
         // Try to get the context limit from the model's metadata
