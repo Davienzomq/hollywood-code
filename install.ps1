@@ -51,7 +51,55 @@ Pop-Location
 # 3b. Renamed runtime — a copy of the Bun runtime named hollycode.exe, so the
 # gateway AND the opencode server it spawns (via process.execPath) both show as
 # "hollycode.exe" in Task Manager instead of the generic "bun.exe".
-Copy-Item $BUN_EXE (Join-Path $DEST "hollycode.exe") -Force
+$HOLLY_EXE = Join-Path $DEST "hollycode.exe"
+Copy-Item $BUN_EXE $HOLLY_EXE -Force
+
+# 3c. Give hollycode.exe its clapperboard icon (best-effort; uses only the
+# Windows resource API — no external tools). Parses assets/hollycode.ico and
+# writes RT_ICON + RT_GROUP_ICON resources into the exe.
+try {
+    $icoPath = Join-Path $DEST "assets\hollycode.ico"
+    if (Test-Path $icoPath) {
+        Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class HollyRes {
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern IntPtr BeginUpdateResource(string f, bool del);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool UpdateResource(IntPtr h, IntPtr type, IntPtr name, ushort lang, byte[] data, uint len);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool EndUpdateResource(IntPtr h, bool discard);
+}
+"@
+        $ico = [System.IO.File]::ReadAllBytes($icoPath)
+        $count = [BitConverter]::ToUInt16($ico, 4)
+        $entries = @()
+        for ($i = 0; $i -lt $count; $i++) {
+            $o = 6 + $i * 16
+            $len = [BitConverter]::ToUInt32($ico, $o + 8)
+            $off = [BitConverter]::ToUInt32($ico, $o + 12)
+            $img = New-Object byte[] $len
+            [Array]::Copy($ico, $off, $img, 0, $len)
+            $entries += [pscustomobject]@{ w = $ico[$o]; h = $ico[$o + 1]; data = $img; id = (101 + $i) }
+        }
+        $ms = New-Object System.IO.MemoryStream
+        $bw = New-Object System.IO.BinaryWriter($ms)
+        $bw.Write([UInt16]0); $bw.Write([UInt16]1); $bw.Write([UInt16]$count)
+        foreach ($e in $entries) {
+            $bw.Write([Byte]$e.w); $bw.Write([Byte]$e.h); $bw.Write([Byte]0); $bw.Write([Byte]0)
+            $bw.Write([UInt16]1); $bw.Write([UInt16]32); $bw.Write([UInt32]$e.data.Length); $bw.Write([UInt16]$e.id)
+        }
+        $bw.Flush(); $grp = $ms.ToArray()
+        $h = [HollyRes]::BeginUpdateResource($HOLLY_EXE, $true)
+        foreach ($e in $entries) { [HollyRes]::UpdateResource($h, [IntPtr]3, [IntPtr]$e.id, 0, $e.data, [UInt32]$e.data.Length) | Out-Null }
+        [HollyRes]::UpdateResource($h, [IntPtr]14, [IntPtr]1, 0, $grp, [UInt32]$grp.Length) | Out-Null
+        [HollyRes]::EndUpdateResource($h, $false) | Out-Null
+        Write-Ok "Applied the clapperboard icon to hollycode.exe."
+    }
+} catch {
+    Write-Ok "Icon step skipped (optional)."
+}
 
 # 4. Launchers on PATH
 Write-Step "Creating launchers in $BUN_BIN..."
