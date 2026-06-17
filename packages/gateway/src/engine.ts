@@ -1065,12 +1065,23 @@ export async function createEngine(config: GatewayConfig): Promise<{
       case "compact":
       case "compress": {
         if (!sid) { await responder.sendText("No active session."); break }
+        const compactModel = defaultModel ?? freeModel
+        if (!compactModel) {
+          await responder.sendText("⚠️ No model configured — run /model first, then /compact.")
+          break
+        }
         await responder.sendText("📦 Compacting — summarizing older context to free space...")
-        const compRes = await opencodeV2.v2.session.compact({ sessionID: sid }).catch((err: any) => ({ error: err }))
-        if ((compRes as any)?.error) {
-          await responder.sendText(
-            `⚠️ Compaction failed: ${(compRes as any).error?.message ?? "unknown error"} — try again, or /new for a fresh session.`,
-          )
+        // Mirror the TUI: v1 summarize WITH a model (the summary is model-generated).
+        const compRes = await opencode.client.session
+          .summarize({ path: { id: sid }, body: { providerID: compactModel.providerID, modelID: compactModel.modelID } })
+          .then(() => ({ ok: true as const }))
+          .catch((err: any) => {
+            console.error("[compact] summarize failed:", err)
+            return { ok: false as const, error: err }
+          })
+        if (!compRes.ok) {
+          const msg = (compRes.error as any)?.message ?? String((compRes.error as any) ?? "unknown error")
+          await responder.sendText(`⚠️ Compaction failed: ${msg} — try again, or /new for a fresh session.`)
         } else {
           await responder.sendText("✅ Session compacted — key info kept, older messages summarized.")
         }
