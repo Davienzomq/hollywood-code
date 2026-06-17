@@ -111,6 +111,15 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // Injected by the gateway: deliver voice/audio to a chat (used by the say/TTS tool).
   let deliverVoice: ((channelId: string, conversationId: string, audio: Uint8Array) => Promise<void>) | undefined
 
+  // /debug — verbose logging toggle.
+  let verbose = config.debug ?? false
+
+  // /goal — per-conversation goal strings, keyed by sessionKey.
+  const goalMap = new Map<string, string>()
+
+  // /loop — per-conversation setInterval handles, keyed by sessionKey.
+  const loopMap = new Map<string, ReturnType<typeof setInterval>>()
+
   // --- Session persistence (keyed by "channelId:conversationId") -----------
   const STORE = path.join(os.homedir(), ".hollywood-gateway-sessions.json")
   const sessionMap = new Map<string, string>() // "channelId:conversationId" → sessionID
@@ -728,8 +737,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
     await resolvePending(sessionId, responder, autoAllow)
 
     const flavor = PERSONALITIES[personality]
-    const promptText = flavor ? `[Personality: ${flavor}]\n\n${msg.text}` : msg.text
+    const goal = goalMap.get(sessionKey(channelId, msg.conversationId))
+    let promptText = flavor ? `[Personality: ${flavor}]\n\n${msg.text}` : msg.text
+    if (goal) promptText = `[Goal: ${goal} — keep working until this is fully met; do not stop early.]\n\n${promptText}`
     const pinnedModel = config.model !== "auto" ? defaultModel : undefined
+    if (verbose) log("engine", `handleMessage: goal=${goal ?? "none"} flavor=${personality}`)
     log("engine", `handleMessage: "${msg.text.slice(0, 40)}" model=${pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "auto"} → prompting...`)
 
     const poller = setInterval(() => { void resolvePending(sessionId, responder, autoAllow) }, 3000)
@@ -955,10 +967,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
         await responder.sendText(
           "🎬 Hollywood Code — remote control\n" +
             "Send me a message and I'll work on your project.\n\n" +
-            "/new · /sessions · /status · /stop · /model · /undo · /redo · /fork\n" +
+            "/new · /clear · /sessions · /status · /stop · /model · /undo · /redo · /fork\n" +
             "/rename · /compact · /export · /copy · /agents · /skills\n" +
             "/review · /init · /share · /unshare · /move · /thinking\n" +
             "/variants · /autostart · /org\n" +
+            "/goal · /loop · /debug\n" +
             "/doctor · /rewind · /permissions · /context · /help",
         )
         break
@@ -967,7 +980,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
       case "help": {
         await responder.sendText(
           "🎬 Commands:\n" +
-            "/new — fresh session\n/sessions — list or switch session\n/status — current session\n/stop — abort task\n" +
+            "/new · /clear — fresh session\n/sessions — list or switch session\n/status — current session\n/stop — abort task\n" +
             "/model — show or change model (/model auto = router)\n/cost — savings report\n/undo — undo last\n/fork — fork session\n/rename — rename session\n" +
             "/compact — compact session\n/export — export transcript\n/copy — copy transcript\n/agents — list agents\n" +
             "/skills — list skills\n/init — init with AGENTS.md\n/share — share session\n/review — review changes\n" +
@@ -985,6 +998,9 @@ export async function createEngine(config: GatewayConfig): Promise<{
             "/variants — switch model variant (picker)\n" +
             "/autostart on|off|status — manage OS auto-start of the gateway\n" +
             "/org — switch active Console organization\n" +
+            "/goal [condition|off|clear] — set/show/clear a per-session goal\n" +
+            "/loop <seconds> | <prompt> — run a prompt on an interval; /loop stop to cancel\n" +
+            "/debug on|off — toggle verbose logging\n" +
             "/doctor — diagnose install (bins, deps, auth, server)\n" +
             "/rewind — roll back to a past user message (picker)\n" +
             "/permissions [tool allow|ask|deny] — view/edit tool permissions\n" +
@@ -994,7 +1010,8 @@ export async function createEngine(config: GatewayConfig): Promise<{
       }
 
       // --- session management ---
-      case "new": {
+      case "new":
+      case "clear": {
         const key = sessionKey(channelId, conversationId)
         sessionMap.delete(key)
         saveStore()
@@ -1940,6 +1957,90 @@ export async function createEngine(config: GatewayConfig): Promise<{
         break
       }
 
+      // --- debug ---
+      case "debug": {
+        const a = args.toLowerCase()
+        if (a !== "on" && a !== "off") {
+          const logDir = path.join(os.homedir(), "AppData", "Local", "hollywood", "logs")
+          await responder.sendText(
+            `🐛 Debug logging is ${verbose ? "ON" : "OFF"}\nLog dir: ${logDir}\nUsage: /debug on|off`,
+          )
+          break
+        }
+        verbose = a === "on"
+        config.debug = verbose
+        saveGatewayConfig(config)
+        await responder.sendText(verbose ? "🐛 Debug ON — verbose logging enabled." : "🐛 Debug OFF.")
+        break
+      }
+
+      // --- goal ---
+      case "goal": {
+        const key = sessionKey(channelId, conversationId)
+        const trimmed = args.trim()
+        if (!trimmed) {
+          const current = goalMap.get(key)
+          await responder.sendText(
+            current ? `🎯 Current goal:\n${current}\n\nClear with /goal off or /goal clear.` : "🎯 No goal set. Usage: /goal <condition>",
+          )
+          break
+        }
+        if (trimmed === "off" || trimmed === "clear") {
+          goalMap.delete(key)
+          await responder.sendText("🎯 Goal cleared.")
+          break
+        }
+        goalMap.set(key, trimmed)
+        await responder.sendText(`🎯 Goal set:\n${trimmed}\n\nI'll keep working until this is fully met. Clear with /goal off.`)
+        break
+      }
+
+      // --- loop ---
+      case "loop": {
+        const key = sessionKey(channelId, conversationId)
+        const trimmed = args.trim()
+        if (!trimmed) {
+          const active = loopMap.has(key)
+          await responder.sendText(
+            active
+              ? "🔁 Loop is running. Stop with /loop stop.\nUsage: /loop <seconds> | <prompt>"
+              : "🔁 No loop active.\nUsage: /loop <seconds> | <prompt>\nExample: /loop 60 | summarize new git commits",
+          )
+          break
+        }
+        if (trimmed === "stop" || trimmed === "off") {
+          const existing = loopMap.get(key)
+          if (existing) { clearInterval(existing); loopMap.delete(key) }
+          await responder.sendText("🔁 Loop stopped.")
+          break
+        }
+        const pipe = trimmed.indexOf("|")
+        if (pipe === -1) {
+          await responder.sendText("Usage: /loop <seconds> | <prompt>\nExample: /loop 60 | check build status")
+          break
+        }
+        const rawSec = parseInt(trimmed.slice(0, pipe).trim(), 10)
+        const loopPrompt = trimmed.slice(pipe + 1).trim()
+        if (!loopPrompt) { await responder.sendText("A prompt is required after the |."); break }
+        const seconds = isNaN(rawSec) || rawSec < 30 ? 30 : rawSec
+        // Clear any existing loop for this conversation.
+        const oldInterval = loopMap.get(key)
+        if (oldInterval) { clearInterval(oldInterval); loopMap.delete(key) }
+        const handle = setInterval(async () => {
+          try {
+            const out = await runPrompt(channelId, conversationId, loopPrompt)
+            if (deliver) await deliver(channelId, conversationId, out)
+          } catch (err: any) {
+            log("loop", `Error in loop for ${key}: ${err?.message ?? err}`)
+          }
+        }, seconds * 1000)
+        loopMap.set(key, handle)
+        await responder.sendText(
+          `🔁 Loop started — running every ${seconds}s:\n"${loopPrompt}"\n\nStop with /loop stop.`,
+        )
+        break
+      }
+
       // --- CLI-only stubs ---
       case "diff":
       case "editor":
@@ -2004,6 +2105,9 @@ export async function createEngine(config: GatewayConfig): Promise<{
     clearInterval(reconciler)
     clearInterval(curatorTimer)
     clearInterval(cronInboxTimer)
+    // Clear all active /loop intervals.
+    for (const handle of loopMap.values()) clearInterval(handle)
+    loopMap.clear()
     recall.close()
     eventAbort.abort()
     if (serverProc) {

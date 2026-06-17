@@ -223,7 +223,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
     // Full command list the engine handles (mirrors packages/telegram + the
     // gateway's Phase C/D additions + the CLI-only stubs).
     const commands = [
-      "new", "status", "stop", "model", "sessions", "s",
+      "new", "clear", "status", "stop", "model", "sessions", "s",
       "cost", "usage", "undo", "compact", "rename", "fork",
       "export", "copy", "agents", "skills", "init", "share",
       "review", "move", "thinking", "autoallow", "remote", "help", "start",
@@ -238,6 +238,8 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       "diff", "editor", "exit", "themes", "timeline", "timestamps", "stuntdouble", "connect",
       // Diagnostic / context commands
       "doctor", "rewind", "permissions", "context",
+      // v3 utility commands
+      "debug", "goal", "loop",
     ] as const
 
     for (const cmd of commands) {
@@ -286,6 +288,10 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
         { command: "variants", description: "Switch model variant" },
         { command: "autostart", description: "Manage OS auto-start (on/off/status)" },
         { command: "org", description: "Switch active Console organization" },
+        { command: "clear", description: "Fresh session (alias of /new)" },
+        { command: "debug", description: "Toggle verbose logging (on|off)" },
+        { command: "goal", description: "Set/show/clear a per-session goal" },
+        { command: "loop", description: "Run a prompt on an interval; /loop stop to cancel" },
         { command: "help", description: "Show all commands" },
         { command: "doctor", description: "Diagnose install (checks bins, auth, server)" },
         { command: "rewind", description: "Roll back to a past user message" },

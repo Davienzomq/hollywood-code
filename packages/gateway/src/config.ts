@@ -38,6 +38,8 @@ export interface GatewayConfig {
   skillMaxAgeDays?: number
   /** Native MCP tools toggled on/off by id (e.g. { browser: true }). Managed via /tools. */
   tools?: Record<string, boolean>
+  /** Verbose debug logging. Toggle with /debug on|off. */
+  debug?: boolean
 }
 
 const DIR = path.join(os.homedir(), ".config", "hollywood")

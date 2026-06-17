@@ -1099,6 +1099,12 @@ export function Prompt(props: PromptProps) {
         personalityFlavor
           ? [{ type: "text", text: `[Personality: ${personalityFlavor}]`, synthetic: true }]
           : []
+      // Hollycode: prepend goal directive when one is set.
+      const goalText = (kv.get("hollycode.goal", "") as string) || ""
+      const goalParts: { type: "text"; text: string; synthetic: true }[] =
+        goalText
+          ? [{ type: "text", text: `[Goal: ${goalText} — keep working until this is fully met; do not stop early.]`, synthetic: true }]
+          : []
       sdk.client.session
         .prompt({
           sessionID,
@@ -1108,6 +1114,7 @@ export function Prompt(props: PromptProps) {
           variant,
           parts: [
             ...personalityParts,
+            ...goalParts,
             ...editorParts,
             {
               type: "text",

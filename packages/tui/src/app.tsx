@@ -354,6 +354,11 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   })
 })
 
+// ── /loop module-level state (survives dialog close; cleared on stop) ──
+let hollycodeLoopTimer: ReturnType<typeof setInterval> | undefined
+let hollycodeLoopSeconds = 60
+let hollycodeLoopPrompt = ""
+
 function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPluginHost }) {
   const startup = useTuiStartup()
   const tuiConfig = useTuiConfig()
@@ -423,6 +428,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   onCleanup(() => {
     offSelectionKeys()
     attention.dispose()
+    if (hollycodeLoopTimer !== undefined) {
+      clearInterval(hollycodeLoopTimer)
+      hollycodeLoopTimer = undefined
+    }
   })
 
   // Wire up console copy-to-clipboard via opentui's onCopySelection callback
@@ -1079,6 +1088,136 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
               ? "Auto-memory ON — I will silently save durable facts to AGENTS.md after each turn"
               : "Auto-memory OFF",
             variant: "success",
+          })
+          dialog.clear()
+        },
+      },
+      // ── /debug — toggle verbose debug flag + show log location ──
+      {
+        name: "hollycode.debug",
+        title: "Debug — toggle verbose logging",
+        slashName: "debug",
+        category: "System",
+        run: () => {
+          const current = kv.get("hollycode.debug", false) as boolean
+          const next = !current
+          kv.set("hollycode.debug", next)
+          const logDir = nodePath.join(os.homedir(), ".hollycode", "logs")
+          DialogAlert.show(
+            dialog,
+            `Debug mode ${next ? "ON" : "OFF"}`,
+            next
+              ? `Verbose logging is now enabled.\n\nLogs are written to:\n  ${logDir}\n\nToggle off with /debug again.`
+              : "Verbose logging is now disabled.",
+          )
+        },
+      },
+      // ── /goal — set a goal directive injected into every outgoing prompt ──
+      {
+        name: "hollycode.goal",
+        title: "Goal — set a persistent goal directive",
+        slashName: "goal",
+        slashAliases: ["objective"],
+        category: "Memory",
+        run: async () => {
+          const current = (kv.get("hollycode.goal", "") as string) || ""
+          const choice = await DialogPrompt.show(
+            dialog,
+            current
+              ? `Current goal: "${current}"\n\nEnter a new goal, or type "off" / "clear" to remove it`
+              : 'Enter your goal (e.g. "finish the auth flow") — leave blank to see current',
+            { placeholder: current || "e.g. finish the auth flow" },
+          )
+          if (choice === null || choice === undefined) return
+          const trimmed = choice.trim()
+          if (trimmed === "" && current) {
+            // blank input → show current without changing
+            DialogAlert.show(dialog, "Current goal", current || "No goal set.")
+            return
+          }
+          if (trimmed === "off" || trimmed === "clear" || trimmed === "") {
+            kv.set("hollycode.goal", "")
+            toast.show({ message: "Goal cleared — no directive will be injected", variant: "info" })
+          } else {
+            kv.set("hollycode.goal", trimmed)
+            toast.show({ message: `Goal set: "${trimmed}"`, variant: "success" })
+          }
+          dialog.clear()
+        },
+      },
+      // ── /loop — repeat a prompt on an interval until /loop stop ──
+      {
+        name: "hollycode.loop",
+        title: "Loop — repeat a prompt on an interval (or stop)",
+        slashName: "loop",
+        category: "System",
+        run: async () => {
+          // If a loop is already running, show status and offer to stop.
+          if (hollycodeLoopTimer !== undefined) {
+            const choice = await DialogPrompt.show(
+              dialog,
+              `Loop is active (every ${hollycodeLoopSeconds}s): "${hollycodeLoopPrompt}"\n\nType "stop" to cancel, or press Escape to keep it running`,
+              { placeholder: "stop" },
+            )
+            if ((choice ?? "").trim().toLowerCase() === "stop") {
+              clearInterval(hollycodeLoopTimer)
+              hollycodeLoopTimer = undefined
+              toast.show({ message: "Loop stopped", variant: "info" })
+              dialog.clear()
+            }
+            return
+          }
+
+          const input = await DialogPrompt.show(
+            dialog,
+            'Loop — format: "<seconds> | <prompt>" (min 30s)\nExample: "60 | summarize progress"\nOr type "stop" to cancel any running loop',
+            { placeholder: "60 | summarize progress" },
+          )
+          if (!input) return
+          const trimmed = input.trim()
+          if (trimmed.toLowerCase() === "stop") {
+            toast.show({ message: "No loop is currently running", variant: "info" })
+            dialog.clear()
+            return
+          }
+
+          const pipeIdx = trimmed.indexOf("|")
+          if (pipeIdx === -1) {
+            toast.show({ message: 'Usage: "<seconds> | <prompt>" — e.g. "60 | summarize progress"', variant: "error" })
+            return
+          }
+          const secondsStr = trimmed.slice(0, pipeIdx).trim()
+          const loopPromptText = trimmed.slice(pipeIdx + 1).trim()
+          const seconds = parseInt(secondsStr, 10)
+          if (!loopPromptText || isNaN(seconds) || seconds < 30) {
+            toast.show({ message: "Minimum interval is 30 seconds", variant: "error" })
+            return
+          }
+
+          hollycodeLoopSeconds = seconds
+          hollycodeLoopPrompt = loopPromptText
+
+          const fireLoop = () => {
+            // Inject the loop prompt into the TUI prompt input and submit it.
+            const ref = promptRef.current
+            if (!ref) {
+              toast.show({ message: "Loop: no active prompt — stopping", variant: "warning" })
+              clearInterval(hollycodeLoopTimer)
+              hollycodeLoopTimer = undefined
+              return
+            }
+            ref.set({ input: loopPromptText, parts: [] })
+            ref.submit()
+          }
+
+          // Fire immediately, then on the interval.
+          fireLoop()
+          hollycodeLoopTimer = setInterval(fireLoop, seconds * 1000) as unknown as ReturnType<typeof setInterval>
+
+          toast.show({
+            message: `Loop started: every ${seconds}s — run /loop to stop`,
+            variant: "success",
+            duration: 5000,
           })
           dialog.clear()
         },
