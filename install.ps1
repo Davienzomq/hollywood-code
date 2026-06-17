@@ -101,6 +101,50 @@ public static class HollyRes {
     Write-Ok "Icon step skipped (optional)."
 }
 
+# 3d. Give hollycode.exe a version resource so Task Manager's Processes tab shows
+# "Hollycode" (it displays the FileDescription, not the file name — without this
+# the renamed Bun runtime would show as "Bun"). Best-effort, Windows API only.
+try {
+    $verExe = Join-Path $DEST "hollycode.exe"
+    function New-VNode($key, $wType, $vlen, $val, $children) {
+        $s = New-Object System.IO.MemoryStream; $w = New-Object System.IO.BinaryWriter($s)
+        $w.Write([uint16]0); $w.Write([uint16]$vlen); $w.Write([uint16]$wType)
+        $w.Write([System.Text.Encoding]::Unicode.GetBytes($key)); $w.Write([uint16]0); $w.Flush()
+        while ($s.Length % 4 -ne 0) { $s.WriteByte(0) }
+        if ($val -ne $null -and $val.Length -gt 0) { $s.Write($val, 0, $val.Length); while ($s.Length % 4 -ne 0) { $s.WriteByte(0) } }
+        if ($children -ne $null -and $children.Length -gt 0) { $s.Write($children, 0, $children.Length) }
+        $a = $s.ToArray(); $l = [BitConverter]::GetBytes([uint16]$a.Length); $a[0] = $l[0]; $a[1] = $l[1]; return , $a
+    }
+    function Join-V4($arrays) {
+        $s = New-Object System.IO.MemoryStream
+        foreach ($a in $arrays) { $s.Write($a, 0, $a.Length); while ($s.Length % 4 -ne 0) { $s.WriteByte(0) } }
+        return , $s.ToArray()
+    }
+    function SV($t) { return (, ([System.Text.Encoding]::Unicode.GetBytes($t) + [byte[]]@(0, 0))) }
+    $strs = @(
+        (New-VNode "FileDescription" 1 10 (SV "Hollycode") $null),
+        (New-VNode "ProductName" 1 10 (SV "Hollycode") $null),
+        (New-VNode "FileVersion" 1 8 (SV "1.0.0.0") $null),
+        (New-VNode "ProductVersion" 1 8 (SV "1.0.0.0") $null),
+        (New-VNode "OriginalFilename" 1 14 (SV "hollycode.exe") $null),
+        (New-VNode "InternalName" 1 10 (SV "hollycode") $null)
+    )
+    $st = New-VNode "040904B0" 1 0 $null (Join-V4 $strs)
+    $sfi = New-VNode "StringFileInfo" 1 0 $null $st
+    $vn = New-VNode "Translation" 0 4 ([byte[]]@(0x09, 0x04, 0xB0, 0x04)) $null
+    $vfi = New-VNode "VarFileInfo" 1 0 $null $vn
+    $ffiVals = @(0xFEEF04BDL, 0x00010000L, 0x00010000L, 0L, 0x00010000L, 0L, 0x3FL, 0L, 0x40004L, 1L, 0L, 0L, 0L)
+    $fm = New-Object System.IO.MemoryStream; $fw = New-Object System.IO.BinaryWriter($fm)
+    foreach ($v in $ffiVals) { $fw.Write([uint32]$v) }; $fw.Flush(); $ffi = $fm.ToArray()
+    $vroot = New-VNode "VS_VERSION_INFO" 0 52 $ffi (Join-V4 @($sfi, $vfi))
+    $vh = [HollyRes]::BeginUpdateResource($verExe, $false)
+    [HollyRes]::UpdateResource($vh, [IntPtr]16, [IntPtr]1, 1033, $vroot, [UInt32]$vroot.Length) | Out-Null
+    [HollyRes]::EndUpdateResource($vh, $false) | Out-Null
+    Write-Ok "Named the runtime 'Hollycode' (Task Manager / version info)."
+} catch {
+    Write-Ok "Version-name step skipped (optional)."
+}
+
 # 4. Launchers on PATH
 Write-Step "Creating launchers in $BUN_BIN..."
 New-Item -ItemType Directory -Force -Path $BUN_BIN | Out-Null
