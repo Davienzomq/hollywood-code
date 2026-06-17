@@ -653,12 +653,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
       .trim()) || ""
   const promptFailed = (r: any): boolean => {
     if (r?.error || !r?.data) return true
-    if (replyTextOf(r)) return false
-    // No assistant text — only treat as a failure (and fall back) when there's an
-    // actual error/retry part (provider rejected it: no credits, auth, rate
-    // limit). An empty turn with no error is left alone so we never re-run work.
-    const ps = (r.data.parts ?? []) as any[]
-    return ps.some((p: any) => p.type === "retry" || p.type === "error")
+    // No assistant text = failure. A paid model with no credits returns an EMPTY
+    // response (no parts, no error part) — so checking only for error parts let it
+    // slip through as "success" and the bot replied with nothing (looked frozen).
+    // Falling back is gated on a pinned paid model below, so a free model's empty
+    // turn never pointlessly re-runs.
+    return !replyTextOf(r)
   }
   const promptWithFallback = async (
     sessionId: string,
