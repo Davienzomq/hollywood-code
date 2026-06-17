@@ -232,6 +232,8 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       "personality", "insights", "compress", "voice", "curate", "profile",
       // Native MCP tools (browser, …)
       "tools", "mcps",
+      // New commands (v2)
+      "unshare", "redo", "variants", "autostart", "org",
       // CLI-only stubs — the engine replies "CLI-only" for these
       "diff", "editor", "exit", "themes", "timeline", "timestamps", "stuntdouble", "connect",
     ] as const
@@ -277,6 +279,11 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
         { command: "profile", description: "What the agent knows about you" },
         { command: "curate", description: "Archive unused auto-skills" },
         { command: "tools", description: "Enable/disable native tools (browser)" },
+        { command: "unshare", description: "Stop sharing the active session" },
+        { command: "redo", description: "Redo a previously undone revert" },
+        { command: "variants", description: "Switch model variant" },
+        { command: "autostart", description: "Manage OS auto-start (on/off/status)" },
+        { command: "org", description: "Switch active Console organization" },
         { command: "help", description: "Show all commands" },
       ])
       // Clear any stale narrower scope so the default menu we just set wins in

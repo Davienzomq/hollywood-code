@@ -367,6 +367,91 @@ export function Session() {
     })
   })
 
+  // Auto-memory: after each turn becomes idle, run a silent background review
+  // that decides what durable facts to save to AGENTS.md.
+  // This mirrors the gateway's reviewAndRemember (engine.ts ~line 803).
+  // The review itself is fire-and-forget via a separate review session so it
+  // never blocks the UI or the current session.
+  const HOLLYCODE_AUTOMEMORY_REVIEW_SESSION_KEY = `hollycode.automemory.reviewSessionID.${route.sessionID}`
+  event.on("session.status", (evt) => {
+    if (evt.properties.sessionID !== route.sessionID) return
+    if (evt.properties.status.type !== "idle") return
+    if (!kv.get("hollycode.automemory", true)) return
+
+    // Fire-and-forget: do NOT await here — this is a background task.
+    void (async () => {
+      try {
+        const msgs = sync.data.message[route.sessionID] ?? []
+        const lastAssistant = msgs.findLast((m) => m.role === "assistant")
+        const lastUser = msgs.findLast((m) => m.role === "user")
+        if (!lastAssistant || !lastUser) return
+
+        const userParts = sync.data.part[lastUser.id] ?? []
+        const assistantParts = sync.data.part[lastAssistant.id] ?? []
+        const userText = userParts.filter((p) => p.type === "text" && !(p as any).synthetic).map((p) => (p as any).text || "").join(" ").trim()
+        const assistantText = assistantParts.filter((p) => p.type === "text").map((p) => (p as any).text || "").join("\n").trim()
+        if (!userText || !assistantText) return
+
+        // Get or create a dedicated review session
+        let reviewSessionID: string | undefined = kv.get(HOLLYCODE_AUTOMEMORY_REVIEW_SESSION_KEY)
+        if (!reviewSessionID) {
+          const created = await sdk.client.session.create({ title: "hollycode-auto-memory-review" }).catch(() => null)
+          if (!created?.data?.id) return
+          reviewSessionID = created.data.id
+          kv.set(HOLLYCODE_AUTOMEMORY_REVIEW_SESSION_KEY, reviewSessionID)
+        }
+
+        const prompt =
+          "You are a silent curator for a coding agent. From the exchange below, output TWO sections, exactly:\n" +
+          "PROJECT:\n- durable facts about THIS project (decisions, conventions, where things live) — or NONE\n" +
+          "USER:\n- durable facts about the USER across all projects (preferences, identity, working style) — or NONE\n\n" +
+          "Max 5 bullets per section. Ignore greetings, one-off chatter, and transient task details.\n\n" +
+          `User: ${userText}\n\nAssistant: ${assistantText}`
+
+        const res = await sdk.client.session.prompt({
+          sessionID: reviewSessionID,
+          parts: [{ type: "text", text: prompt }],
+        } as any).catch(() => null)
+
+        const out = ((((res as any)?.data?.parts ?? []) as any[]).filter((p: any) => p.type === "text").map((p: any) => p.text || "").join("\n").trim())
+        if (!out) return
+
+        const bulletsOf = (s: string | undefined) =>
+          (s ?? "").split("\n").map((l) => l.trim()).filter((l) => l.startsWith("- ")).map((l) => l.slice(2).trim()).filter((b) => b && !/^none\b/i.test(b))
+
+        const projM = out.match(/PROJECT:\s*([\s\S]*?)(?=USER:|$)/i)
+        const userM = out.match(/USER:\s*([\s\S]*)$/i)
+        const projBullets = bulletsOf(projM?.[1])
+        const userBullets = bulletsOf(userM?.[1])
+
+        const { readFileSync: readFs, writeFileSync: writeFs, mkdirSync: mkdirFs, existsSync: existsFs } = await import("node:fs")
+        const nodePth = await import("node:path")
+        const nodeOs = await import("node:os")
+
+        const appendBullets = (file: string, header: string, bullets: string[]) => {
+          if (!bullets.length) return
+          let content = ""
+          try { content = readFs(file, "utf8") } catch { /* new file */ }
+          if (!content.includes(header)) content = content.trimEnd() + (content.trim() ? "\n\n" : "") + header + "\n"
+          let added = 0
+          for (const b of bullets) {
+            if (!content.includes(b)) { content = content.trimEnd() + `\n- ${b}\n`; added++ }
+          }
+          if (added) {
+            mkdirFs(nodePth.default.dirname(file), { recursive: true })
+            writeFs(file, content)
+          }
+        }
+
+        const dir = project.instance.directory() || process.cwd()
+        appendBullets(nodePth.default.join(dir, "AGENTS.md"), "## Auto-memory", projBullets)
+        appendBullets(nodePth.default.join(nodeOs.default.homedir(), ".config", "opencode", "AGENTS.md"), "## About the user", userBullets)
+      } catch {
+        /* best-effort, never surface errors */
+      }
+    })()
+  })
+
   // Helper: Find next visible message boundary in direction
   const findNextVisibleMessage = (direction: "next" | "prev"): string | null => {
     const children = scroll.getChildren()
@@ -1077,6 +1162,41 @@ export function Session() {
         dialog.clear()
         moveChild(-1)
       }),
+    },
+    // ── Hollycode session commands ──
+    {
+      title: "Stop — abort the current running task",
+      value: "hollycode.stop",
+      category: "Session",
+      slash: {
+        name: "stop",
+        aliases: ["abort", "cancel"],
+      },
+      run: async () => {
+        const status = sync.data.session_status?.[route.sessionID]
+        if (status?.type === "idle") {
+          toast.show({ message: "No running task to stop", variant: "info" })
+          dialog.clear()
+          return
+        }
+        await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
+        toast.show({ message: "Task stopped", variant: "success" })
+        dialog.clear()
+      },
+    },
+    {
+      title: "Init — initialize project AGENTS.md",
+      value: "hollycode.init",
+      category: "Session",
+      slash: {
+        name: "init",
+      },
+      run: async () => {
+        toast.show({ message: "Initializing AGENTS.md…", variant: "info" })
+        await sdk.client.session.init({ sessionID: route.sessionID }).catch(() => {})
+        toast.show({ message: "AGENTS.md initialized", variant: "success" })
+        dialog.clear()
+      },
     },
   ])
 

@@ -1085,6 +1085,20 @@ export function Prompt(props: PromptProps) {
       })
     } else {
       move.startSubmit()
+      // Hollycode: prepend personality flavor text when one is set.
+      const HOLLYCODE_PERSONALITIES: Record<string, string> = {
+        default: "",
+        concise: "Be terse and direct. Answer in as few words as correctness allows; skip preamble.",
+        mentor: "Explain your reasoning as you go, teaching the user the why behind each step, patiently.",
+        pirate: "Respond in the voice of a witty pirate, while keeping all technical content fully correct.",
+        pair: "Act as a hands-on pair-programmer: think out loud, propose small steps, confirm before big changes.",
+      }
+      const personalityKey = (kv.get("hollycode.personality", "default") as string) || "default"
+      const personalityFlavor = HOLLYCODE_PERSONALITIES[personalityKey] ?? ""
+      const personalityParts: { type: "text"; text: string; synthetic: true }[] =
+        personalityFlavor
+          ? [{ type: "text", text: `[Personality: ${personalityFlavor}]`, synthetic: true }]
+          : []
       sdk.client.session
         .prompt({
           sessionID,
@@ -1093,6 +1107,7 @@ export function Prompt(props: PromptProps) {
           model: selectedModel,
           variant,
           parts: [
+            ...personalityParts,
             ...editorParts,
             {
               type: "text",

@@ -932,6 +932,157 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           }
         },
       },
+      // ── Hollycode: insights, autoallow, personality, automemory ──
+      {
+        name: "hollycode.insights",
+        title: "Insights — per-model usage stats",
+        slashName: "insights",
+        category: "Memory",
+        run: async () => {
+          const daysStr = await DialogPrompt.show(dialog, "Insights — number of days to look back", { placeholder: "7" })
+          const days = parseInt(daysStr ?? "7", 10) || 7
+          const since = Date.now() - days * 86400000
+          const list = await sdk.client.session.list({} as any).catch(() => null)
+          const all: any[] = ((list as any)?.data ?? []) as any[]
+          const recent = all.filter((s: any) => ((s.time?.updated ?? s.time?.created ?? 0) >= since || true)).slice(0, 50)
+          let sessionCount = 0
+          let assistantMsgs = 0
+          const models = new Map<string, number>()
+          for (const s of recent) {
+            const msgsRes = await sdk.client.session.messages({ sessionID: s.id }).catch(() => null)
+            const data: any[] = ((msgsRes as any)?.data ?? []) as any[]
+            let used = false
+            for (const m of data) {
+              const info = m.info ?? m
+              if (info.role === "assistant" && info.modelID) {
+                assistantMsgs++
+                used = true
+                const k = `${info.providerID}/${info.modelID}`
+                models.set(k, (models.get(k) ?? 0) + 1)
+              }
+            }
+            if (used) sessionCount++
+          }
+          const top = [...models.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
+          const lines = top.map(([k, n]) => `  ${k}: ${n} turns`)
+          DialogAlert.show(
+            dialog,
+            `Insights — last ${days} days`,
+            `Sessions with activity: ${sessionCount}\nAssistant turns: ${assistantMsgs}\n\nBy model:\n${lines.join("\n") || "  (none yet)"}\n\nTip: /cost shows stunt-double savings for the current session.`,
+          )
+        },
+      },
+      {
+        name: "hollycode.autoallow",
+        title: "Auto-allow — toggle automatic tool permission approval",
+        slashName: "autoallow",
+        category: "Memory",
+        run: async () => {
+          const current = kv.get("hollycode.autoallow", false) as boolean
+          const choice = await DialogPrompt.show(
+            dialog,
+            `Auto-allow is ${current ? "ON (all tools approved automatically)" : "OFF (you approve each tool)"} — type on or off`,
+            { placeholder: current ? "off" : "on" },
+          )
+          const want = (choice ?? "").trim().toLowerCase()
+          if (want !== "on" && want !== "off") {
+            if (choice !== null && choice !== undefined) toast.show({ message: "Type on or off", variant: "info" })
+            return
+          }
+          const next = want === "on"
+          if (next === current) {
+            toast.show({ message: `Auto-allow already ${want}`, variant: "info" })
+            return
+          }
+          kv.set("hollycode.autoallow", next)
+          // Mirror gateway behaviour: write permission block to opencode.json in the project dir.
+          try {
+            const dir = project.instance.directory() || process.cwd()
+            const p = nodePath.join(dir, "opencode.json")
+            let raw: any = { $schema: "https://opencode.ai/config.json" }
+            try { if (existsSync(p)) raw = JSON.parse(readFileSync(p, "utf8").replace(/^﻿/, "")) } catch { /* ignore */ }
+            raw.permission = next
+              ? { external_directory: "allow", bash: "allow", read: "allow", write: "allow", edit: "allow", webfetch: "allow" }
+              : { external_directory: "ask", bash: "ask", read: "allow", write: "ask", edit: "ask", webfetch: "allow" }
+            writeFileSync(p, JSON.stringify(raw, null, 2))
+          } catch { /* best-effort */ }
+          toast.show({
+            message: next
+              ? "Auto-allow ON — all tool requests will be approved automatically"
+              : "Auto-allow OFF — you will be asked to approve each tool request",
+            variant: "success",
+          })
+          dialog.clear()
+        },
+      },
+      {
+        name: "hollycode.personality",
+        title: "Personality — set the agent personality",
+        slashName: "personality",
+        category: "Memory",
+        run: async () => {
+          const PERSONALITIES: Record<string, string> = {
+            default: "",
+            concise: "Be terse and direct. Answer in as few words as correctness allows; skip preamble.",
+            mentor: "Explain your reasoning as you go, teaching the user the why behind each step, patiently.",
+            pirate: "Respond in the voice of a witty pirate, while keeping all technical content fully correct.",
+            pair: "Act as a hands-on pair-programmer: think out loud, propose small steps, confirm before big changes.",
+          }
+          const current = (kv.get("hollycode.personality", "default") as string) || "default"
+          const names = Object.keys(PERSONALITIES)
+          const choice = await DialogPrompt.show(
+            dialog,
+            `Personality is: ${current}. Type a name (${names.join(", ")}) — or leave blank to see current`,
+            { placeholder: current },
+          )
+          if (choice === null || choice === undefined) return
+          const want = choice.trim().toLowerCase() || current
+          if (!(want in PERSONALITIES)) {
+            toast.show({ message: `Unknown personality. Choose: ${names.join(", ")}`, variant: "error" })
+            return
+          }
+          kv.set("hollycode.personality", want)
+          toast.show({
+            message: want === "default"
+              ? "Personality reset to default"
+              : `Personality set to: ${want} — flavor text will be prepended to your next prompts`,
+            variant: "success",
+          })
+          dialog.clear()
+        },
+      },
+      {
+        name: "hollycode.automemory",
+        title: "Auto-memory — toggle silent post-turn memory curation",
+        slashName: "automemory",
+        category: "Memory",
+        run: async () => {
+          const current = kv.get("hollycode.automemory", true) as boolean
+          const choice = await DialogPrompt.show(
+            dialog,
+            `Auto-memory is ${current ? "ON — I save durable facts to AGENTS.md after each turn" : "OFF"} — type on or off`,
+            { placeholder: current ? "off" : "on" },
+          )
+          const want = (choice ?? "").trim().toLowerCase()
+          if (want !== "on" && want !== "off") {
+            if (choice !== null && choice !== undefined) toast.show({ message: "Type on or off", variant: "info" })
+            return
+          }
+          const next = want === "on"
+          if (next === current) {
+            toast.show({ message: `Auto-memory already ${want}`, variant: "info" })
+            return
+          }
+          kv.set("hollycode.automemory", next)
+          toast.show({
+            message: next
+              ? "Auto-memory ON — I will silently save durable facts to AGENTS.md after each turn"
+              : "Auto-memory OFF",
+            variant: "success",
+          })
+          dialog.clear()
+        },
+      },
       {
         name: "remote.control",
         title: "Remote control (Telegram)",

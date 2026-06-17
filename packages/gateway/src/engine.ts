@@ -13,6 +13,7 @@ import type { GatewayContext, Responder, StatusHandle } from "./types"
 import { type GatewayConfig, saveGatewayConfig, channel } from "./config"
 import type { SchedulerHandle } from "./scheduler"
 import { createTranscriber, createSpeaker, localSttAvailable } from "./transcription"
+import { installStartup, removeStartup, startupStatus } from "./startup"
 import { openRecallIndex } from "./search"
 import { installAgentTools, processAgentInbox } from "./agent-cron"
 
@@ -954,9 +955,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
         await responder.sendText(
           "🎬 Hollywood Code — remote control\n" +
             "Send me a message and I'll work on your project.\n\n" +
-            "/new · /sessions · /status · /stop · /model · /undo · /fork\n" +
+            "/new · /sessions · /status · /stop · /model · /undo · /redo · /fork\n" +
             "/rename · /compact · /export · /copy · /agents · /skills\n" +
-            "/review · /init · /share · /move · /thinking · /help",
+            "/review · /init · /share · /unshare · /move · /thinking\n" +
+            "/variants · /autostart · /org · /help",
         )
         break
       }
@@ -976,7 +978,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
             "/personality <name> — set agent personality\n/insights [days] — usage insights\n/compress — compact context\n" +
             "/voice on|off — speak replies aloud (free local Piper)\n" +
             "/profile — what I've learned about you\n/curate — archive unused auto-skills\n" +
-            "/tools — enable/disable native tools (browser, …)\n\nSend any text to work on your project.",
+            "/tools — enable/disable native tools (browser, …)\n" +
+            "/unshare — stop sharing the active session\n" +
+            "/redo — redo a previously undone revert\n" +
+            "/variants — switch model variant (picker)\n" +
+            "/autostart on|off|status — manage OS auto-start of the gateway\n" +
+            "/org — switch active Console organization\n\nSend any text to work on your project.",
         )
         break
       }
@@ -1284,6 +1291,103 @@ export async function createEngine(config: GatewayConfig): Promise<{
         const diff = await opencode.client.session.diff({ path: { id: sid } }).catch(() => null)
         if (!diff?.data) { await responder.sendText("No changes to review."); break }
         await responder.sendText((diff.data as any).diff || JSON.stringify(diff.data, null, 2))
+        break
+      }
+
+      // --- unshare ---
+      case "unshare": {
+        if (!sid) { await responder.sendText("No active session."); break }
+        await opencode.client.session.unshare({ path: { id: sid } }).catch(() => {})
+        await responder.sendText("🔒 Session is no longer shared.")
+        break
+      }
+
+      // --- redo ---
+      case "redo": {
+        if (!sid) { await responder.sendText("No active session."); break }
+        await opencode.client.session.unrevert({ path: { id: sid } }).catch(() => {})
+        await responder.sendText("↪️ Redo applied — reverted messages restored.")
+        break
+      }
+
+      // --- variants ---
+      case "variants": {
+        // List models via the v2 API, find the current model, and show its variants.
+        const modelRes = await opencodeV2.v2.model.list().catch(() => null)
+        const allModels: any[] = (modelRes?.data as any) ?? []
+        const curModel = defaultModel
+        const modelEntry = curModel
+          ? allModels.find(
+              (m: any) =>
+                m.id === curModel.modelID ||
+                (m.providerID === curModel.providerID && (m.id === curModel.modelID || m.modelID === curModel.modelID)),
+            )
+          : undefined
+        const variants: Array<{ id: string }> = modelEntry?.variants ?? []
+        if (!variants.length) {
+          await responder.sendText(
+            `ℹ️ No variants available for ${curModel ? `${curModel.providerID}/${curModel.modelID}` : "the current model"}.`,
+          )
+          break
+        }
+        const options = variants.map((v: any) => String(v.id))
+        const chosen = await responder.askQuestion({ question: "🎞️ Pick a model variant:", options })
+        if (!chosen) break // timed out / cancelled
+        try {
+          const p = path.join(DIRECTORY, "opencode.jsonc")
+          const raw = fs.existsSync(p) ? readJsonc(p) : { $schema: "https://opencode.ai/config.json" }
+          if (typeof raw.model === "object" && raw.model !== null) {
+            raw.model.variant = chosen
+          } else {
+            raw.model = { id: curModel?.modelID, providerID: curModel?.providerID, variant: chosen }
+          }
+          fs.writeFileSync(p, JSON.stringify(raw, null, 2))
+        } catch { /* best-effort */ }
+        await responder.sendText(`✅ Variant set to: ${chosen}`)
+        break
+      }
+
+      // --- autostart ---
+      case "autostart": {
+        const a = args.trim().toLowerCase()
+        if (a === "on") {
+          const ok = installStartup(DIRECTORY)
+          await responder.sendText(ok ? "✅ Auto-start installed — gateway starts at login." : "⚠️ Could not install auto-start.")
+          break
+        }
+        if (a === "off") {
+          removeStartup()
+          await responder.sendText("🗑 Auto-start removed.")
+          break
+        }
+        // status or no arg
+        const active = startupStatus()
+        await responder.sendText(
+          `⚙️ Auto-start is ${active ? "ON" : "OFF"}\nUsage: /autostart on|off|status`,
+        )
+        break
+      }
+
+      // --- org ---
+      case "org": {
+        const orgsRes = await opencodeV2.experimental.console.listOrgs().catch(() => null)
+        const orgs: any[] = (orgsRes?.data as any)?.orgs ?? (orgsRes?.data as any) ?? []
+        if (!Array.isArray(orgs) || orgs.length === 0) {
+          await responder.sendText("ℹ️ No switchable organizations found (single-org or not logged in to Console).")
+          break
+        }
+        if (orgs.length === 1) {
+          await responder.sendText(`ℹ️ Only one organization available: ${orgs[0]?.name ?? orgs[0]?.orgID ?? orgs[0]?.id}. Nothing to switch.`)
+          break
+        }
+        const options = orgs.map((o: any) => String(o.name ?? o.orgID ?? o.id ?? "(unknown)"))
+        const chosen = await responder.askQuestion({ question: "🏢 Pick an organization:", options })
+        if (!chosen) break // timed out / cancelled
+        const idx = options.indexOf(chosen)
+        const target = orgs[idx]
+        if (!target) break
+        await opencodeV2.experimental.console.switchOrg({ accountID: target.accountID, orgID: target.orgID ?? target.id }).catch(() => {})
+        await responder.sendText(`✅ Switched to org: ${chosen}`)
         break
       }
 
