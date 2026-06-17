@@ -133,20 +133,32 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
     const askQuestion = (ask: { question: string; options: string[] }): Promise<string> => {
       return new Promise(async (resolve) => {
         const key = String(++cbSeq)
-        pendingQuestions.set(key, resolve)
+        let settled = false
+        let timer: ReturnType<typeof setTimeout> | undefined
+        // Single resolution path (idempotent). Resolving "" means "no choice" —
+        // every caller treats an empty/unmatched answer as a no-op.
+        const settle = (val: string) => {
+          if (settled) return
+          settled = true
+          if (timer) clearTimeout(timer)
+          pendingQuestions.delete(key)
+          resolve(val)
+        }
+        pendingQuestions.set(key, settle)
         const rows = ask.options
           .slice(0, 8)
           .map((label: string, i: number) => [
             { text: label.slice(0, 60), callback_data: `qa:${key}:${i}` },
           ])
+        // Safety net: this picker is awaited inline and the update queue is
+        // sequential, so an unanswered question would freeze the whole bot.
+        // Auto-cancel (no choice) after 3 min so the bot always recovers.
+        timer = setTimeout(() => settle(""), 3 * 60 * 1000)
         await bot.api
           .sendMessage(chatId, `❓ ${ask.question}`.slice(0, TELEGRAM_MAX), {
             reply_markup: { inline_keyboard: rows },
           })
-          .catch(() => {
-            pendingQuestions.delete(key)
-            resolve(ask.options[0] ?? "ok")
-          })
+          .catch(() => settle(""))
       })
     }
 
