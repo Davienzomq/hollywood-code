@@ -200,17 +200,24 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       return firstSpace === -1 ? "" : text.slice(firstSpace + 1).trim()
     }
 
-    const handleCmd = (command: string) => async (gramCtx: Context) => {
-      const chatId = gramCtx.chat!.id
-      const userId = gramCtx.from!.id.toString()
-      const args = argsOf(gramCtx)
-      const incomingMsg: IncomingMessage = {
-        conversationId: chatId.toString(),
-        userId,
-        text: (gramCtx.message as any)?.text ?? `/${command}`,
-      }
-      const responder = makeResponder(chatId, gramCtx)
-      await ctx.handleCommand("telegram", command, args, incomingMsg, responder)
+    const handleCmd = (command: string) => (gramCtx: Context) => {
+      // DETACHED (same reason as the message:text handler below): commands like
+      // /model, /sessions and /move open an inline-keyboard question and AWAIT the
+      // tap. grammy processes updates sequentially, so awaiting here would block
+      // the update loop from ever delivering that tap → the question never
+      // resolves and the whole bot freezes. Run detached so the loop stays free.
+      void (async () => {
+        const chatId = gramCtx.chat!.id
+        const userId = gramCtx.from!.id.toString()
+        const args = argsOf(gramCtx)
+        const incomingMsg: IncomingMessage = {
+          conversationId: chatId.toString(),
+          userId,
+          text: (gramCtx.message as any)?.text ?? `/${command}`,
+        }
+        const responder = makeResponder(chatId, gramCtx)
+        await ctx.handleCommand("telegram", command, args, incomingMsg, responder)
+      })()
     }
 
     // Full command list the engine handles (mirrors packages/telegram + the

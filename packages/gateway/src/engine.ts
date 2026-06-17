@@ -729,6 +729,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     const flavor = PERSONALITIES[personality]
     const promptText = flavor ? `[Personality: ${flavor}]\n\n${msg.text}` : msg.text
     const pinnedModel = config.model !== "auto" ? defaultModel : undefined
+    log("engine", `handleMessage: "${msg.text.slice(0, 40)}" model=${pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "auto"} → prompting...`)
 
     const poller = setInterval(() => { void resolvePending(sessionId, responder, autoAllow) }, 3000)
     const { result, fellBackTo } = await promptWithFallback(
@@ -737,6 +738,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
       pinnedModel,
     )
     clearInterval(poller)
+    log("engine", `handleMessage: prompt returned (fellBackTo=${fellBackTo ?? "no"}, hasData=${!!result.data}, err=${!!(result as any).error})`)
     await resolvePending(sessionId, responder, autoAllow)
 
     statusHandles.delete(sessionId)
@@ -1333,10 +1335,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
         // step 1 — provider (plus an AUTO shortcut)
         const AUTO_LABEL = "🎬 auto (router)"
+        log("engine", `/model: provider step (providers: ${providers.map((p: any) => p.id).join(", ")})`)
         const provChoice = await responder.askQuestion({
           question: `🤖 Current: ${cur}\n\nPick a provider:`,
           options: [AUTO_LABEL, ...providers.map((p: any) => String(p.id))],
         })
+        log("engine", `/model: provider chosen = "${provChoice}"`)
         if (!provChoice) break // timed out / cancelled
         if (provChoice === AUTO_LABEL) {
           config.model = "auto"
@@ -1355,10 +1359,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
         if (!models.length) { await responder.sendText(`No models for ${provChoice}.`); break }
 
         // step 2 — model within that provider
+        log("engine", `/model: model step for ${provChoice} (${models.length} models)`)
         const modelChoice = await responder.askQuestion({
           question: `📦 ${provChoice} — pick a model:`,
           options: models,
         })
+        log("engine", `/model: model chosen = "${modelChoice}"`)
         if (!modelChoice) break // timed out / cancelled
         const chosen = `${provChoice}/${modelChoice}`
         defaultModel = { providerID: provChoice, modelID: modelChoice }
@@ -1367,6 +1373,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
         await opencode.client.config.update({ body: { model: chosen } as any }).catch(() => {})
         syncModelToFile(chosen)
         await responder.sendText(`✅ Model set to ${chosen}`)
+        log("engine", `/model: set to ${chosen}`)
         break
       }
 
