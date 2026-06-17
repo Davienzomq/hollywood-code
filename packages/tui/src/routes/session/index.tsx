@@ -655,11 +655,19 @@ export function Session() {
           })
           return
         }
-        void sdk.client.session.summarize({
-          sessionID: route.sessionID,
-          modelID: selectedModel.modelID,
-          providerID: selectedModel.providerID,
-        })
+        void sdk.client.session
+          .summarize({
+            sessionID: route.sessionID,
+            modelID: selectedModel.modelID,
+            providerID: selectedModel.providerID,
+          })
+          .then(() => toast.show({ message: "Session compacted — older context summarized", variant: "success" }))
+          .catch((error) =>
+            toast.show({
+              message: error instanceof Error ? error.message : "Compaction failed",
+              variant: "error",
+            }),
+          )
         dialog.clear()
       },
     },

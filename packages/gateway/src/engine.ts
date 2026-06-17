@@ -1065,8 +1065,15 @@ export async function createEngine(config: GatewayConfig): Promise<{
       case "compact":
       case "compress": {
         if (!sid) { await responder.sendText("No active session."); break }
-        await opencodeV2.v2.session.compact({ sessionID: sid }).catch(() => {})
-        await responder.sendText("📦 Session compacted.")
+        await responder.sendText("📦 Compacting — summarizing older context to free space...")
+        const compRes = await opencodeV2.v2.session.compact({ sessionID: sid }).catch((err: any) => ({ error: err }))
+        if ((compRes as any)?.error) {
+          await responder.sendText(
+            `⚠️ Compaction failed: ${(compRes as any).error?.message ?? "unknown error"} — try again, or /new for a fresh session.`,
+          )
+        } else {
+          await responder.sendText("✅ Session compacted — key info kept, older messages summarized.")
+        }
         break
       }
 
