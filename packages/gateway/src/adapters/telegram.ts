@@ -216,7 +216,14 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
           text: (gramCtx.message as any)?.text ?? `/${command}`,
         }
         const responder = makeResponder(chatId, gramCtx)
-        await ctx.handleCommand("telegram", command, args, incomingMsg, responder)
+        // A thrown command must never crash the whole gateway (an unhandled
+        // rejection in this detached task would kill the process and freeze the
+        // bot). Catch, report to the user, and keep the bot alive.
+        try {
+          await ctx.handleCommand("telegram", command, args, incomingMsg, responder)
+        } catch (err: any) {
+          try { await responder.sendText(`⚠️ /${command} failed: ${err?.message ?? err}`) } catch { /* ignore */ }
+        }
       })()
     }
 
@@ -239,7 +246,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       // Diagnostic / context commands
       "doctor", "rewind", "permissions", "context",
       // v3 utility commands
-      "debug", "goal", "loop", "autocompact",
+      "debug", "goal", "loop", "autocompact", "mode", "effort",
     ] as const
 
     for (const cmd of commands) {
@@ -298,6 +305,8 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
         { command: "permissions", description: "View/edit per-tool permission rules" },
         { command: "context", description: "Show context-window token usage" },
         { command: "autocompact", description: "Auto-compact threshold (default 95%) / on|off" },
+        { command: "mode", description: "Permission mode: ask|auto-edit|plan|bypass|auto" },
+        { command: "effort", description: "Reasoning effort / model variant (e.g. high|max)" },
       ])
       // Clear any stale narrower scope so the default menu we just set wins in
       // private chats too. Telegram resolves the most specific scope first, so a
@@ -327,7 +336,11 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
           text,
         }
         const responder = makeResponder(chatId, gramCtx)
-        await ctx.handleMessage("telegram", incomingMsg, responder)
+        try {
+          await ctx.handleMessage("telegram", incomingMsg, responder)
+        } catch (err: any) {
+          try { await responder.sendText(`⚠️ Error: ${err?.message ?? err}`) } catch { /* ignore */ }
+        }
       })()
     })
 

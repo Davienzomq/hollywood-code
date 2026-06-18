@@ -358,6 +358,51 @@ export function Session() {
     }
   })
 
+  // Mode-aware permission auto-approval (mirrors the gateway). Driven by the KV
+  // `hollycode.mode` set via /mode: bypass approves all; auto-edit approves
+  // edits/writes but lets bash ask; auto classifies the latest user request
+  // (heuristic) and approves edits only when it reads as a clear edit task.
+  const classifyAutoTui = (text: string): "ask" | "auto-edit" | "plan" => {
+    const t = (text || "").trim()
+    if (!t) return "ask"
+    if (/\b(delete|remove|\brm\b|drop|truncate|git\s+push|force[-\s]?push|deploy|publish|prod|\.env\b|secret|credential|password|api[\s-]?key|token|migrat|apag|destr[oó])/i.test(t)) return "ask"
+    const plan = /(\?\s*$)|\b(how|why|what|explain|investigate|research|plan|design|review|analy[sz]e|understand|como|por\s?qu|o\s?que|qual|onde|explica|investiga|planej|analis|revis|deveria|devo)/i.test(t)
+    const edit = /\b(fix|add|change|implement|refactor|rename|update|create|write|edit|build|make|replace|install|configure|corrig|adicion|cria|muda|implementa|atualiz|escrev|gera)/i.test(t)
+    if (plan && edit) return "ask"
+    if (plan) return "plan"
+    if (edit) return "auto-edit"
+    return "ask"
+  }
+  const editPerms = ["edit", "write", "read", "webfetch"]
+  event.on("permission.asked", (evt) => {
+    const req = evt.properties as any
+    if (req.sessionID !== route.sessionID) return
+    const m = kv.get("hollycode.mode", "ask") as string
+    let approve = false
+    if (m === "bypass") approve = true
+    else if (m === "auto-edit") approve = editPerms.includes(req.permission)
+    else if (m === "auto") {
+      const lastUser = [...messages()].reverse().find((x) => x.role === "user")
+      const text = lastUser
+        ? (sync.data.part[lastUser.id] ?? [])
+            .filter((p: any) => p.type === "text")
+            .map((p: any) => p.text)
+            .join(" ")
+        : ""
+      if (classifyAutoTui(text) === "auto-edit") approve = editPerms.includes(req.permission)
+    }
+    if (approve) {
+      void sdk.client.permission
+        .reply({
+          reply: "always",
+          requestID: req.id,
+          directory: sync.session.get(req.sessionID)?.directory,
+          workspace: project.workspace.current(),
+        })
+        .catch(() => {})
+    }
+  })
+
   let seeded = false
   let scroll: ScrollBoxRenderable
   let prompt: PromptRef | undefined

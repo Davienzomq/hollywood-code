@@ -1025,6 +1025,63 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         },
       },
       {
+        name: "hollycode.mode",
+        title: "Mode — permission/agent mode (ask|auto-edit|plan|bypass|auto)",
+        slashName: "mode",
+        category: "Memory",
+        run: async () => {
+          const current = kv.get("hollycode.mode", "ask") as string
+          const choice = await DialogPrompt.show(
+            dialog,
+            `Mode is ${current}. Type: ask, auto-edit, plan, bypass, or auto`,
+            { placeholder: current },
+          )
+          const raw0 = (choice ?? "").trim().toLowerCase().replace(/\s+/g, "-")
+          const norm: Record<string, string> = {
+            ask: "ask", confirm: "ask",
+            "auto-edit": "auto-edit", autoedit: "auto-edit", edit: "auto-edit",
+            plan: "plan", planning: "plan",
+            bypass: "bypass", yolo: "bypass", all: "bypass",
+            auto: "auto", smart: "auto",
+          }
+          const want = norm[raw0]
+          if (!want) {
+            if (choice !== null && choice !== undefined)
+              toast.show({ message: "Valid: ask, auto-edit, plan, bypass, auto", variant: "info" })
+            return
+          }
+          kv.set("hollycode.mode", want)
+          // Plan mode → the read-only `plan` agent; every other mode → `build`.
+          local.agent.set(want === "plan" ? "plan" : "build")
+          // Persist a permission block for parity with the gateway (auto uses the
+          // ask block; the per-task auto-reply handler refines it at runtime).
+          try {
+            const dir = project.instance.directory() || process.cwd()
+            const p = nodePath.join(dir, "opencode.json")
+            let cfg: any = { $schema: "https://opencode.ai/config.json" }
+            try { if (existsSync(p)) cfg = JSON.parse(readFileSync(p, "utf8").replace(/^﻿/, "")) } catch { /* ignore */ }
+            const blocks: Record<string, any> = {
+              ask: { external_directory: "ask", bash: "ask", read: "allow", write: "ask", edit: "ask", webfetch: "allow" },
+              "auto-edit": { external_directory: "allow", bash: "ask", read: "allow", write: "allow", edit: "allow", webfetch: "allow" },
+              plan: { external_directory: "allow", bash: "ask", read: "allow", write: "deny", edit: "deny", webfetch: "allow" },
+              bypass: { external_directory: "allow", bash: "allow", read: "allow", write: "allow", edit: "allow", webfetch: "allow" },
+            }
+            cfg.permission = blocks[want === "auto" ? "ask" : want]
+            writeFileSync(p, JSON.stringify(cfg, null, 2))
+          } catch { /* best-effort */ }
+          kv.set("hollycode.autoallow", want === "bypass")
+          const labels: Record<string, string> = {
+            ask: "🙋 ask — confirm before edits & bash",
+            "auto-edit": "✍️ auto-edit — edits apply automatically, bash asks",
+            plan: "📋 plan — read-only, no edits",
+            bypass: "⚡ bypass — approve everything",
+            auto: "🤖 auto — best mode chosen per task",
+          }
+          toast.show({ message: labels[want], variant: "success" })
+          dialog.clear()
+        },
+      },
+      {
         name: "hollycode.personality",
         title: "Personality — set the agent personality",
         slashName: "personality",

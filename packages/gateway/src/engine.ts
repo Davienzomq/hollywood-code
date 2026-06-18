@@ -161,12 +161,36 @@ export async function createEngine(config: GatewayConfig): Promise<{
   }
   const projKey = (dir: string, convKey: string) => `${dir}|@|${convKey}`
 
-  // --- Permission mode ------------------------------------------------------
-  let autoAllow = config.autoAllow ?? false
-  const permissionBlock = () =>
-    autoAllow
-      ? { external_directory: "allow", bash: "allow", read: "allow", write: "allow", edit: "allow", webfetch: "allow" }
-      : { external_directory: "ask", bash: "ask", read: "allow", write: "ask", edit: "ask", webfetch: "allow" }
+  // --- Permission / agent mode ----------------------------------------------
+  // Five modes (like Claude Code's permission modes), mapped onto opencode's
+  // existing primitives — a per-tool permission block + the agent used per
+  // prompt (plan vs build). `auto` resolves per task (see Phase 4 / handleMessage).
+  type Mode = "ask" | "auto-edit" | "plan" | "bypass" | "auto"
+  type Perm = "allow" | "ask" | "deny"
+  const MODE_PERMISSIONS: Record<Exclude<Mode, "auto">, Record<string, Perm>> = {
+    // confirm before edits & bash
+    ask: { external_directory: "ask", bash: "ask", read: "allow", write: "ask", edit: "ask", webfetch: "allow" },
+    // edits run automatically; bash still asks
+    "auto-edit": { external_directory: "allow", bash: "ask", read: "allow", write: "allow", edit: "allow", webfetch: "allow" },
+    // read-only planning: no edits (the `plan` agent also blocks them)
+    plan: { external_directory: "allow", bash: "ask", read: "allow", write: "deny", edit: "deny", webfetch: "allow" },
+    // approve everything
+    bypass: { external_directory: "allow", bash: "allow", read: "allow", write: "allow", edit: "allow", webfetch: "allow" },
+  }
+
+  // Migrate the legacy autoAllow boolean into the new mode.
+  let mode: Mode = config.mode ?? (config.autoAllow ? "bypass" : "ask")
+  // `autoAllow` (used by the reconciler) is now derived: bypass approves stragglers.
+  let autoAllow = mode === "bypass"
+  // Per-task resolved sub-mode for `auto` (sessionID → concrete mode). Phase 4.
+  const autoResolved = new Map<string, Exclude<Mode, "auto">>()
+
+  // The concrete mode driving permissions for a session right now.
+  const effectiveMode = (sid?: string): Exclude<Mode, "auto"> =>
+    mode === "auto" ? (sid && autoResolved.get(sid)) || "ask" : mode
+  // The agent to run for a session: plan mode → "plan", everything else → "build".
+  const agentForMode = (sid?: string): "plan" | "build" => (effectiveMode(sid) === "plan" ? "plan" : "build")
+  const permissionBlock = () => MODE_PERMISSIONS[mode === "auto" ? "ask" : mode]
 
   const applyPermissionMode = () => {
     try {
@@ -174,7 +198,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
       const raw = fs.existsSync(p) ? readJsonc(p) : { $schema: "https://opencode.ai/config.json" }
       raw.permission = permissionBlock()
       fs.writeFileSync(p, JSON.stringify(raw, null, 2))
-      log("engine", `Permission mode: ${autoAllow ? "auto-allow" : "ask via channel"}`)
+      log("engine", `Mode: ${mode}`)
     } catch (err) {
       console.error("Could not update opencode.jsonc:", err)
     }
@@ -407,13 +431,13 @@ export async function createEngine(config: GatewayConfig): Promise<{
     }
   }
 
-  const resolvePending = async (sid: string, responder: Responder, autoAllowFlag: boolean) => {
+  const resolvePending = async (sid: string, responder: Responder) => {
     // v1 global permissions
     const globalPerms = await opencodeV2.permission.list({}).catch(() => null)
     const v1Requests: any[] = (globalPerms?.data as any) ?? []
     for (const r of v1Requests) {
       if (r.sessionID !== sid) continue
-      if (autoAllowFlag) {
+      if (autoApproves(sid, r.permission as string)) {
         await opencodeV2.permission.reply({ requestID: r.id, reply: "always" }).catch(() => {})
         continue
       }
@@ -434,7 +458,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     const perms = await opencodeV2.v2.session.permission.list({ sessionID: sid }).catch(() => null)
     const v2Requests: any[] = (perms?.data as any)?.data ?? []
     for (const r of v2Requests) {
-      if (autoAllowFlag) {
+      if (autoApproves(sid, r.action as string)) {
         await opencodeV2.v2.session.permission.reply({ sessionID: sid, requestID: r.id, reply: "always" }).catch(() => {})
         continue
       }
@@ -453,7 +477,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     for (const q of qs) {
       if (q.sessionID !== sid) continue
       const first = q.questions?.[0]
-      if (autoAllowFlag || !first?.options?.length) {
+      if (mode === "bypass" || !first?.options?.length) {
         const answers: string[][] =
           q.questions?.map((qq: any) => (qq.options?.[0]?.label ? [qq.options[0].label] : ["ok"])) ?? []
         await opencodeV2.v2.session.question
@@ -510,7 +534,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // still pending (which used to freeze the session and force /new).
   const reconciler = setInterval(() => {
     for (const [sid, responder] of activeResponders) {
-      void resolvePending(sid, responder, autoAllow)
+      void resolvePending(sid, responder)
     }
   }, 2500)
 
@@ -707,6 +731,102 @@ export async function createEngine(config: GatewayConfig): Promise<{
     }
   }
 
+  // Switch the permission/agent mode. Writes the mode's permission block and
+  // reboots the server so it takes effect (the agent is applied per-prompt).
+  const applyMode = async (m: Mode): Promise<boolean> => {
+    mode = m
+    autoAllow = mode === "bypass"
+    config.mode = mode
+    config.autoAllow = autoAllow // keep legacy field in sync
+    saveGatewayConfig(config)
+    applyPermissionMode()
+    return reloadServer()
+  }
+
+  const MODE_LABELS: Record<Mode, string> = {
+    ask: "🙋 ask — confirm before edits & bash",
+    "auto-edit": "✍️ auto-edit — edits run automatically, bash asks",
+    plan: "📋 plan — read-only, no edits",
+    bypass: "⚡ bypass — approve everything",
+    auto: "🤖 auto — best mode chosen per task",
+  }
+
+  // --- Auto mode: classify a task into a concrete sub-mode (hybrid) ----------
+  // Risky/destructive → ask; clear edit → auto-edit; exploration/question → plan.
+  const AUTO_SENSITIVE =
+    /\b(delete|deleting|remove|removing|\brm\b|drop\b|truncate|git\s+push|force[-\s]?push|deploy|publish|production|\bprod\b|\.env\b|secret|credential|password|api[\s-]?key|token|migrat(e|ion)|format\s+(the\s+)?(disk|drive)|apag|delet|remov|destr[oó])/i
+  const AUTO_EDIT =
+    /\b(fix|add|change|implement|refactor|rename|update|create|write|edit|build|make|replace|install|configure|set\s?up|generate|append|insert|corrig|adicion|cria|criar|muda|mudar|implementa|refatora|atualiz|escrev|gera)/i
+  const AUTO_PLAN =
+    /(\?\s*$)|\b(how|why|what|which|where|when|explain|investigate|research|plan|design|should\s+i|best|review|analy[sz]e|understand|compare|recommend|como|por\s?qu|o\s?que|qual|onde|quando|explica|investiga|planej|analis|entend|revis|compara|recomend|deveria|devo)/i
+
+  // Returns a concrete mode, or undefined when ambiguous (→ cheap model decides).
+  const classifyHeuristic = (text: string): Exclude<Mode, "auto" | "bypass"> | undefined => {
+    const t = text.trim()
+    if (!t) return "ask"
+    if (AUTO_SENSITIVE.test(t)) return "ask"
+    const planLike = AUTO_PLAN.test(t)
+    const editLike = AUTO_EDIT.test(t)
+    if (planLike && editLike) return undefined
+    if (planLike) return "plan"
+    if (editLike) return "auto-edit"
+    return undefined
+  }
+
+  // Cheap-model classifier for the ambiguous minority. Best-effort; defaults to
+  // the safe "ask" on any failure. Uses a throwaway session so it never pollutes
+  // the user's conversation context.
+  const classifyModel = async (text: string): Promise<Exclude<Mode, "auto" | "bypass">> => {
+    const fb = freeModel ?? defaultModel
+    if (!fb) return "ask"
+    let tmpSid: string | undefined
+    try {
+      const created = await opencode.client.session.create({ body: {} as any }).catch(() => null)
+      tmpSid = (created?.data as any)?.id
+      if (!tmpSid) return "ask"
+      const instruction =
+        "You are a router. Classify the request into ONE word: " +
+        "PLAN (wants analysis/exploration/a plan, no file changes), " +
+        "EDIT (wants clear code/file changes safe to apply automatically), or " +
+        "ASK (risky or destructive changes needing confirmation). " +
+        "Reply with ONLY one word: PLAN, EDIT, or ASK.\n\nRequest:\n" +
+        text
+      const r = await Promise.race([
+        opencode.client.session.prompt({
+          path: { id: tmpSid },
+          body: { parts: [{ type: "text", text: instruction }], model: fb, agent: "build" } as any,
+        }),
+        new Promise((res) => setTimeout(() => res(null), 12_000)),
+      ])
+      const out = replyTextOf(r).toUpperCase()
+      if (out.includes("EDIT")) return "auto-edit"
+      if (out.includes("PLAN")) return "plan"
+      return "ask"
+    } catch {
+      return "ask"
+    } finally {
+      if (tmpSid) await opencode.client.session.delete({ path: { id: tmpSid } }).catch(() => {})
+    }
+  }
+
+  const resolveAutoMode = async (sid: string, text: string): Promise<Exclude<Mode, "auto" | "bypass">> => {
+    let r = classifyHeuristic(text)
+    if (!r) r = await classifyModel(text)
+    autoResolved.set(sid, r)
+    log("engine", `auto mode → ${r} for "${text.slice(0, 40)}"`)
+    return r
+  }
+
+  // In auto mode, decide each permission request by the per-task resolved sub-mode.
+  // Returns whether to auto-approve; otherwise the request is forwarded to the user.
+  const autoApproves = (sid: string, permName: string): boolean => {
+    if (mode === "bypass") return true
+    if (mode !== "auto") return false // static modes: the block already enforced — forward the rest
+    const sub = autoResolved.get(sid) ?? "ask"
+    if (sub === "auto-edit") return ["edit", "write", "read", "webfetch"].includes(permName)
+    return false // ask / plan → forward (plan agent already blocks edits)
+  }
+
   // ---------------------------------------------------------------------------
   // promptWithFallback — run a prompt and, if the selected model fails (request
   // error or a provider error part like "insufficient credits"), retry once on
@@ -734,7 +854,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     model: { providerID: string; modelID: string } | undefined,
   ): Promise<{ result: any; fellBackTo?: string }> => {
     const run = (m?: { providerID: string; modelID: string }) => {
-      const body: any = { parts }
+      const body: any = { parts, agent: agentForMode(sessionId) }
       if (m) body.model = m
       return opencode.client.session
         .prompt({ path: { id: sessionId }, body })
@@ -792,7 +912,22 @@ export async function createEngine(config: GatewayConfig): Promise<{
     statusHandles.set(sessionId, statusHandle)
     statusLines.set(sessionId, [])
 
-    await resolvePending(sessionId, responder, autoAllow)
+    await resolvePending(sessionId, responder)
+
+    // Auto mode: classify THIS task into a concrete sub-mode before prompting,
+    // so the right agent (plan vs build) and approval policy apply to this turn.
+    if (mode === "auto") {
+      const sub = await resolveAutoMode(sessionId, msg.text)
+      await responder
+        .sendText(
+          sub === "plan"
+            ? "🤖 auto → 📋 plan (read-only for this task)"
+            : sub === "auto-edit"
+              ? "🤖 auto → ✍️ auto-edit (applying changes for this task)"
+              : "🤖 auto → 🙋 ask (I'll confirm risky steps)",
+        )
+        .catch(() => {})
+    }
 
     const flavor = PERSONALITIES[personality]
     const goal = goalMap.get(sessionKey(channelId, msg.conversationId))
@@ -802,7 +937,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     if (verbose) log("engine", `handleMessage: goal=${goal ?? "none"} flavor=${personality}`)
     log("engine", `handleMessage: "${msg.text.slice(0, 40)}" model=${pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "auto"} → prompting...`)
 
-    const poller = setInterval(() => { void resolvePending(sessionId, responder, autoAllow) }, 3000)
+    const poller = setInterval(() => { void resolvePending(sessionId, responder) }, 3000)
     const { result, fellBackTo } = await promptWithFallback(
       sessionId,
       [{ type: "text", text: promptText }],
@@ -810,7 +945,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     )
     clearInterval(poller)
     log("engine", `handleMessage: prompt returned (fellBackTo=${fellBackTo ?? "no"}, hasData=${!!result.data}, err=${!!(result as any).error})`)
-    await resolvePending(sessionId, responder, autoAllow)
+    await resolvePending(sessionId, responder)
 
     statusHandles.delete(sessionId)
     statusLines.delete(sessionId)
@@ -1081,7 +1216,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
         if (!sid) { await responder.sendText("No active session."); break }
         const s = await opencode.client.session.get({ path: { id: sid } }).catch(() => null)
         const m = s?.data ? `${(s.data as any).title} (${sid.slice(0, 12)}…)` : sid
-        await responder.sendText(`📁 ${m}\n📂 ${DIRECTORY}`)
+        const modelLine = defaultModel ? `${defaultModel.providerID}/${defaultModel.modelID}` : "auto"
+        await responder.sendText(
+          `📁 ${m}\n📂 ${DIRECTORY}\n🧠 ${modelLine}${config.effort ? ` · effort: ${config.effort}` : ""}\n🎛️ ${MODE_LABELS[mode]}`,
+        )
         break
       }
 
@@ -1435,10 +1573,15 @@ export async function createEngine(config: GatewayConfig): Promise<{
       }
 
       // --- variants ---
+      // --- effort / variants (reasoning effort = model variant) ---
+      case "effort":
       case "variants": {
         // List models via the v2 API, find the current model, and show its variants.
         const modelRes = await opencodeV2.v2.model.list().catch(() => null)
-        const allModels: any[] = (modelRes?.data as any) ?? []
+        // model.list() returns { data: { location, data: ModelV2Info[] } } — the
+        // array is nested under .data.data, not .data.
+        const md: any = modelRes?.data as any
+        const allModels: any[] = Array.isArray(md) ? md : (md?.data ?? [])
         const curModel = defaultModel
         const modelEntry = curModel
           ? allModels.find(
@@ -1450,13 +1593,24 @@ export async function createEngine(config: GatewayConfig): Promise<{
         const variants: Array<{ id: string }> = modelEntry?.variants ?? []
         if (!variants.length) {
           await responder.sendText(
-            `ℹ️ No variants available for ${curModel ? `${curModel.providerID}/${curModel.modelID}` : "the current model"}.`,
+            `ℹ️ No effort levels (variants) available for ${curModel ? `${curModel.providerID}/${curModel.modelID}` : "the current model"}.`,
           )
           break
         }
         const options = variants.map((v: any) => String(v.id))
-        const chosen = await responder.askQuestion({ question: "🎞️ Pick a model variant:", options })
-        if (!chosen) break // timed out / cancelled
+        // Accept a direct arg (e.g. /effort high); otherwise show a picker.
+        let chosen: string | undefined
+        const a = args.trim().toLowerCase()
+        if (a) {
+          chosen = options.find((o) => o.toLowerCase() === a)
+          if (!chosen) {
+            await responder.sendText(`Unknown effort "${args}". Available: ${options.join(", ")}`)
+            break
+          }
+        } else {
+          chosen = await responder.askQuestion({ question: "🎚️ Pick reasoning effort:", options })
+          if (!chosen) break // timed out / cancelled
+        }
         try {
           const p = path.join(DIRECTORY, "opencode.jsonc")
           const raw = fs.existsSync(p) ? readJsonc(p) : { $schema: "https://opencode.ai/config.json" }
@@ -1467,7 +1621,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
           }
           fs.writeFileSync(p, JSON.stringify(raw, null, 2))
         } catch { /* best-effort */ }
-        await responder.sendText(`✅ Variant set to: ${chosen}`)
+        config.effort = chosen
+        saveGatewayConfig(config)
+        await responder.sendText(`🎚️ Effort set to: ${chosen}. Applying…`)
+        const ok = await reloadServer()
+        await responder.sendText(ok ? "✅ Applied — no restart needed." : "⚠️ Saved, but reload failed — restart to apply.")
         break
       }
 
@@ -1620,36 +1778,58 @@ export async function createEngine(config: GatewayConfig): Promise<{
       }
 
       // --- autoallow ---
+      // --- mode (unified permission/agent mode selector) ---
+      case "mode": {
+        const a = args.trim().toLowerCase().replace(/\s+/g, "-")
+        const valid: Mode[] = ["ask", "auto-edit", "plan", "bypass", "auto"]
+        if (!a) {
+          await responder.sendText(
+            `🎛️ Current mode: ${MODE_LABELS[mode]}\n\n` +
+              valid.map((m) => `  ${m}${m === mode ? "  ← current" : ""}`).join("\n") +
+              `\n\nUsage: /mode <ask|auto-edit|plan|bypass|auto>`,
+          )
+          break
+        }
+        const aliases: Record<string, Mode> = {
+          ask: "ask", confirm: "ask",
+          "auto-edit": "auto-edit", autoedit: "auto-edit", edit: "auto-edit", auto_edit: "auto-edit",
+          plan: "plan", planning: "plan",
+          bypass: "bypass", yolo: "bypass", all: "bypass",
+          auto: "auto", smart: "auto",
+        }
+        const target = aliases[a]
+        if (!target) {
+          await responder.sendText(`Unknown mode "${args}". Valid: ${valid.join(", ")}`)
+          break
+        }
+        if (target === mode) { await responder.sendText(`Already in ${target} mode.`); break }
+        await responder.sendText(`🎛️ Switching to ${target}…`)
+        const ok = await applyMode(target)
+        await responder.sendText(
+          ok ? `✅ ${MODE_LABELS[target]}` : "⚠️ Mode saved, but reload failed — try /move to the same dir.",
+        )
+        break
+      }
+
+      // --- autoallow (legacy alias → mode bypass|ask) ---
       case "autoallow": {
         const arg = args.toLowerCase()
         if (arg !== "on" && arg !== "off") {
           await responder.sendText(
-            `🔐 Auto-allow is ${autoAllow ? "ON — everything approved automatically" : "OFF — approvals come here"}\nUsage: /autoallow on|off`,
+            `🔐 Auto-allow is ${autoAllow ? "ON (bypass)" : "OFF"}.\nThis is now part of /mode — try /mode bypass or /mode ask.\nUsage: /autoallow on|off`,
           )
           break
         }
-        const next = arg === "on"
-        if (next === autoAllow) { await responder.sendText(`Already ${arg}.`); break }
-        autoAllow = next
-        config.autoAllow = autoAllow
-        saveGatewayConfig(config)
-        applyPermissionMode()
-        await responder.sendText(`♻️ Applying ${autoAllow ? "auto-allow" : "ask"} mode — restarting server...`)
-        try {
-          server.close()
-          server = await bootServer(DIRECTORY)
-          opencode = { client: createOpencodeClient({ baseUrl: server.url }) }
-          opencodeV2 = createV2Client({ baseUrl: server.url })
-          startEvents()
-        } catch (err) {
-          console.error("Restart failed:", err)
-          await responder.sendText("⚠️ Server restart failed — try /move to the same directory or restart.")
-          break
-        }
+        const target: Mode = arg === "on" ? "bypass" : "ask"
+        if (target === mode) { await responder.sendText(`Already ${arg}.`); break }
+        await responder.sendText(`♻️ Applying ${target} mode…`)
+        const ok = await applyMode(target)
         await responder.sendText(
-          autoAllow
-            ? "✅ Auto-allow ON — tasks run without asking."
-            : "🔐 Ask mode ON — permission requests will arrive with Approve/Deny options.",
+          ok
+            ? target === "bypass"
+              ? "✅ Bypass ON — tasks run without asking."
+              : "🔐 Ask mode ON — permission requests arrive with Approve/Deny."
+            : "⚠️ Server restart failed — try /move to the same directory.",
         )
         break
       }

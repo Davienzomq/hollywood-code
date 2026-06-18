@@ -11,8 +11,18 @@ export interface GatewayConfig {
   directory: string
   /** "auto" (router casts each message) or "providerID/modelID" to pin. */
   model?: string
-  /** true = approve everything; false/undefined = ask via the channel UI. */
+  /** true = approve everything; false/undefined = ask via the channel UI.
+   *  Legacy: superseded by `mode` (bypass === autoAllow). Kept for migration. */
   autoAllow?: boolean
+  /** Permission/agent mode: ask | auto-edit | plan | bypass | auto.
+   *  - ask: confirm before edits & bash
+   *  - auto-edit: edits run automatically, bash still asks
+   *  - plan: read-only planning agent, no edits
+   *  - bypass: approve everything
+   *  - auto: pick the best mode per task (hybrid heuristic + cheap classifier) */
+  mode?: "ask" | "auto-edit" | "plan" | "bypass" | "auto"
+  /** Reasoning effort / model variant (provider-specific, e.g. high|max|minimal). */
+  effort?: string
   /** One block per messaging channel. */
   channels: ChannelConfig[]
   /** Optional voice (Phase B): transcription (apiKey) + TTS (free local Piper or api).

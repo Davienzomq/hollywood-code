@@ -84,5 +84,14 @@ export async function startGateway(config: GatewayConfig) {
   process.on("SIGINT", shutdown)
   process.on("SIGTERM", shutdown)
 
+  // Last-resort safety net: a stray async error anywhere must never take the
+  // whole gateway down (which would silently freeze the bot). Log and keep running.
+  process.on("unhandledRejection", (reason) => {
+    console.error("[gateway] unhandledRejection:", reason)
+  })
+  process.on("uncaughtException", (err) => {
+    console.error("[gateway] uncaughtException:", err)
+  })
+
   return { engine, adapters }
 }
