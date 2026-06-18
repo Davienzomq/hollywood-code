@@ -229,6 +229,37 @@ try {
     Write-Ok "ffmpeg skipped (optional) — video analysis will warn until it's installed."
 }
 
+# 6c. Local speech-to-text (whisper.cpp) — so voice notes transcribe offline
+# with no API key. Best-effort; ships a small multilingual model by default
+# (scripts\install-whisper.ps1 upgrades to the larger, more accurate medium).
+Write-Step "Installing offline voice transcription (whisper.cpp)..."
+try {
+    $wDir = Join-Path $DEST "whisper"
+    $wExe = Join-Path $wDir "main.exe"
+    $wModel = Join-Path $wDir "model.bin"
+    if ((Test-Path $wExe) -and (Test-Path $wModel)) {
+        Write-Ok "whisper already installed."
+    } else {
+        New-Item -ItemType Directory -Force $wDir | Out-Null
+        $wTmp = Join-Path $env:TEMP ("whdl-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Force $wTmp | Out-Null
+        # binary (main.exe + dlls)
+        if (-not (Test-Path $wExe)) {
+            Invoke-WebRequest -Uri "https://github.com/ggerganov/whisper.cpp/releases/download/v1.5.4/whisper-bin-x64.zip" -OutFile (Join-Path $wTmp "w.zip") -UseBasicParsing
+            Expand-Archive -Path (Join-Path $wTmp "w.zip") -DestinationPath $wTmp -Force
+            Get-ChildItem -Recurse $wTmp -Include *.exe, *.dll | ForEach-Object { Copy-Item -Force $_.FullName $wDir }
+        }
+        # small multilingual model (~150MB) — fast default; medium via the script
+        if (-not (Test-Path $wModel)) {
+            Invoke-WebRequest -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" -OutFile $wModel -UseBasicParsing
+        }
+        Remove-Item -Recurse -Force $wTmp -ErrorAction SilentlyContinue
+        Write-Ok "Voice transcription ready (offline, multilingual)."
+    }
+} catch {
+    Write-Ok "whisper skipped (optional) — run scripts\install-whisper.ps1 for offline voice, or set a voice API key."
+}
+
 # 7. Native browser tool (Playwright MCP) — pre-download Chromium, best-effort.
 # The browser tool is on by default; the MCP server installs on first use, but
 # pre-fetching the browser here makes that first use instant.

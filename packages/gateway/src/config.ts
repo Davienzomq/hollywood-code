@@ -27,6 +27,12 @@ export interface GatewayConfig {
    *  model). Auto never crosses providers — it casts smaller/bigger models of
    *  this same provider by task tier. Defaults to the free provider. */
   autoProvider?: string
+  /** Mix model (config.model === "mix"): CROSS-provider casting table by tier
+   *  ("provider/model" each). Unset tiers are auto-detected. Separate from
+   *  autoProvider so the per-provider auto router is never affected. */
+  mixTable?: { low?: string; mid?: string; high?: string }
+  /** The model state to restore when /mix off is run (the value before mix). */
+  preMix?: string
   /** One block per messaging channel. */
   channels: ChannelConfig[]
   /** Optional voice (Phase B): transcription (apiKey) + TTS (free local Piper or api).

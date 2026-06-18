@@ -926,6 +926,45 @@ export async function createEngine(config: GatewayConfig): Promise<{
     return { model: freeModel, tier, score } // provider unavailable → free, no mixing
   }
 
+  // --- Mix model (CROSS-provider) — separate, only when config.model === "mix" -
+  // Casts ACROSS providers by tier from config.mixTable (auto-detected when a
+  // tier is unset): low → free double, high → best paid model of any provider.
+  // Kept fully separate from castForAuto so the per-provider router is untouched.
+  const parseRef = (s?: string): { providerID: string; modelID: string } | undefined => {
+    if (!s || !s.includes("/")) return undefined
+    const i = s.indexOf("/")
+    return { providerID: s.slice(0, i), modelID: s.slice(i + 1) }
+  }
+  const castForMix = async (
+    text: string,
+  ): Promise<{ model?: { providerID: string; modelID: string }; variant?: string; tier: Tier; score: number }> => {
+    const { tier, score } = scoreTask(text)
+    let providers: any[] = []
+    try {
+      const prov = await opencode.client.config.providers()
+      providers = (prov.data as any)?.providers ?? []
+    } catch { /* ignore */ }
+    const modelOf = (providerID: string, modelID: string) => providers.find((p: any) => p.id === providerID)?.models?.[modelID]
+    const variantOf = (providerID: string, modelID: string) => pickEffort(Object.keys(modelOf(providerID, modelID)?.variants ?? {}), tier)
+    // 1. explicit mixTable entry for this tier (if it still exists)
+    const explicit = parseRef(config.mixTable?.[tier])
+    if (explicit && modelOf(explicit.providerID, explicit.modelID)) {
+      return { model: explicit, variant: variantOf(explicit.providerID, explicit.modelID), tier, score }
+    }
+    // 2. auto-detect: low → free double; mid/high → best paid model across providers
+    if (tier === "low") {
+      const v = freeModel ? variantOf(freeModel.providerID, freeModel.modelID) : undefined
+      return { model: freeModel, variant: v, tier, score }
+    }
+    const order = [...providers.filter((p: any) => p.id !== "opencode"), ...providers.filter((p: any) => p.id === "opencode")]
+    for (const p of order) {
+      for (const c of TIER_MODELS[p.id]?.[tier] ?? []) {
+        if (p.models?.[c]) return { model: { providerID: p.id, modelID: c }, variant: variantOf(p.id, c), tier, score }
+      }
+    }
+    return { model: freeModel, tier, score } // nothing better → free fallback
+  }
+
   // ---------------------------------------------------------------------------
   // promptWithFallback — run a prompt and, if the selected model fails (request
   // error or a provider error part like "insufficient credits"), retry once on
@@ -1104,18 +1143,27 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
     const flavor = PERSONALITIES[personality]
     const goal = goalMap.get(sessionKey(channelId, msg.conversationId))
-    // In /model auto, the stuntdouble router scores THIS message and casts a
-    // model + effort WITHIN the active provider only (smaller/lower for easy,
-    // bigger/higher for hard). A pinned model always wins. The free fallback in
-    // promptWithFallback still covers a no-credit model.
-    let pinnedModel = config.model !== "auto" ? defaultModel : undefined
+    // Routing: one selector (config.model), 3 mutually-exclusive modes.
+    //   "auto" → per-provider router (within autoProvider)
+    //   "mix"  → cross-provider router (across providers, via mixTable)
+    //   else   → pinned model (fixed)
+    // auto and mix never run together — sibling branches below.
+    let pinnedModel = config.model && config.model !== "auto" && config.model !== "mix" ? defaultModel : undefined
     let autoTier: Tier | undefined
     let autoVariant: string | undefined
+    let routeKind: "auto" | "mix" | undefined
     if (config.model === "auto") {
       const cast = await castForAuto(msg.text)
       pinnedModel = cast.model
       autoTier = cast.tier
       autoVariant = cast.variant
+      routeKind = "auto"
+    } else if (config.model === "mix") {
+      const cast = await castForMix(msg.text)
+      pinnedModel = cast.model
+      autoTier = cast.tier
+      autoVariant = cast.variant
+      routeKind = "mix"
     }
 
     // Gather visual media as images: direct images + frames sampled from videos.
@@ -1193,7 +1241,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     // Show the reasoning effort (variant) actually used, read from the server's
     // record of the turn — so the label reflects what ran, not just what we asked.
     const effortSuffix = info?.variant && info.variant !== "default" ? ` · ${info.variant}` : ""
-    const tierSuffix = autoTier ? ` · auto:${autoTier}` : ""
+    const tierSuffix = autoTier ? ` · ${routeKind}:${autoTier}` : ""
     const modelLabel = info?.modelID ? `🎬 ${info.providerID}/${info.modelID}${effortSuffix}${tierSuffix}` : "🎬 done"
 
     if (reply) {
@@ -1442,7 +1490,14 @@ export async function createEngine(config: GatewayConfig): Promise<{
         if (!sid) { await responder.sendText("No active session."); break }
         const s = await opencode.client.session.get({ path: { id: sid } }).catch(() => null)
         const m = s?.data ? `${(s.data as any).title} (${sid.slice(0, 12)}…)` : sid
-        const modelLine = defaultModel ? `${defaultModel.providerID}/${defaultModel.modelID}` : "auto"
+        const modelLine =
+          config.model === "auto"
+            ? `🎬 auto (within ${config.autoProvider ?? "free provider"})`
+            : config.model === "mix"
+              ? "🎚️ mix (cross-provider)"
+              : defaultModel
+                ? `${defaultModel.providerID}/${defaultModel.modelID}`
+                : "auto"
         await responder.sendText(
           `📁 ${m}\n📂 ${DIRECTORY}\n🧠 ${modelLine}${config.effort ? ` · effort: ${config.effort}` : ""}\n🎛️ ${MODE_LABELS[mode]}`,
         )
@@ -1539,8 +1594,17 @@ export async function createEngine(config: GatewayConfig): Promise<{
       case "voice": {
         const a = args.toLowerCase()
         if (a !== "on" && a !== "off") {
+          // Two independent legs: speak-replies (TTS) and transcription (STT).
+          const sttSource = config.voice?.apiKey
+            ? "API key"
+            : config.voice && localSttAvailable(config.voice)
+              ? "local whisper"
+              : null
+          const sttLine = sttSource
+            ? `🎤 Transcription: ON (${sttSource}) — send a voice note and I'll read it.`
+            : "🎤 Transcription: OFF — install offline whisper (scripts/install-whisper.ps1) or set a voice API key."
           await responder.sendText(
-            `🔊 Speak-replies is ${speakAlways ? "ON" : "OFF"}\nUsage: /voice on|off (free local Piper TTS — speaks every reply)`,
+            `🔊 Speak-replies (TTS): ${speakAlways ? "ON" : "OFF"} — /voice on|off (free local Piper).\n${sttLine}`,
           )
           break
         }
@@ -1889,8 +1953,85 @@ export async function createEngine(config: GatewayConfig): Promise<{
         break
       }
 
+      // --- mix (cross-provider auto-router; a 3rd mode of the model selector) ---
+      case "mix": {
+        const a = args.trim().toLowerCase()
+        const tiers = ["low", "mid", "high"] as const
+        const clearPinnedFile = () => {
+          try {
+            const p = path.join(DIRECTORY, "opencode.jsonc")
+            const raw = readJsonc(p)
+            delete raw.model
+            fs.writeFileSync(p, JSON.stringify(raw, null, 2))
+          } catch { /* best-effort */ }
+        }
+        if (!a) {
+          const rows = tiers.map((t) => `  ${t}: ${config.mixTable?.[t] ?? "(auto)"}`)
+          await responder.sendText(
+            `🎚️ Mix model (cross-provider) is ${config.model === "mix" ? "ON" : "OFF"}\n${rows.join("\n")}\n\n` +
+              "Usage:\n  /mix on | off\n  /mix low|mid|high <provider/model>\n  /mix auto  (re-detect all tiers)",
+          )
+          break
+        }
+        if (a === "on") {
+          if (config.model !== "mix") config.preMix = config.model
+          config.model = "mix"
+          saveGatewayConfig(config)
+          clearPinnedFile()
+          await responder.sendText("🎚️ Mix ON — easy → free, hard → best paid model across providers. /mix to see the table.")
+          break
+        }
+        if (a === "off") {
+          const restore = config.preMix && config.preMix !== "mix" ? config.preMix : "auto"
+          config.model = restore
+          saveGatewayConfig(config)
+          if (restore !== "auto" && restore.includes("/")) {
+            defaultModel = { providerID: restore.slice(0, restore.indexOf("/")), modelID: restore.slice(restore.indexOf("/") + 1) }
+            syncModelToFile(restore)
+            await responder.sendText(`🎚️ Mix OFF — back to pinned ${restore}.`)
+          } else {
+            clearPinnedFile()
+            await responder.sendText("🎚️ Mix OFF — back to per-provider auto.")
+          }
+          break
+        }
+        if (a === "auto") {
+          config.mixTable = undefined
+          saveGatewayConfig(config)
+          await responder.sendText("🎚️ Mix table reset — all tiers auto-detected (free for easy, best paid for hard).")
+          break
+        }
+        // /mix <tier> <provider/model>
+        const parts2 = args.trim().split(/\s+/)
+        const tier = parts2[0]?.toLowerCase() as (typeof tiers)[number] | undefined
+        const ref = parts2.slice(1).join(" ").trim()
+        if (!tier || !tiers.includes(tier) || !ref.includes("/")) {
+          await responder.sendText("Usage: /mix low|mid|high <provider/model>  ·  /mix on|off|auto")
+          break
+        }
+        if (!config.mixTable) config.mixTable = {}
+        config.mixTable[tier] = ref
+        saveGatewayConfig(config)
+        await responder.sendText(`🎚️ Mix ${tier} → ${ref}${config.model === "mix" ? "" : "  (turn on with /mix on)"}`)
+        break
+      }
+
       // --- model ---
       case "model": {
+        if (args === "mix") {
+          if (config.model !== "mix") config.preMix = config.model
+          config.model = "mix"
+          config.effort = undefined
+          saveGatewayConfig(config)
+          try {
+            const p = path.join(DIRECTORY, "opencode.jsonc")
+            const raw = readJsonc(p)
+            delete raw.model
+            fs.writeFileSync(p, JSON.stringify(raw, null, 2))
+          } catch { /* best-effort */ }
+          await responder.sendText("🎚️ MIX mode — cross-provider: easy → free, hard → best paid model. Configure with /mix.")
+          break
+        }
         if (args === "auto") {
           config.model = "auto"
           config.effort = undefined // variant is model-specific; reset on model change
@@ -1933,20 +2074,36 @@ export async function createEngine(config: GatewayConfig): Promise<{
         if (!providers.length) { await responder.sendText("No providers available."); break }
         const cur =
           config.model === "auto"
-            ? "🎬 auto (Hollywood router casts per message)"
-            : defaultModel
-              ? `${defaultModel.providerID}/${defaultModel.modelID}`
-              : "server default"
+            ? "🎬 auto (per-provider router)"
+            : config.model === "mix"
+              ? "🎚️ mix (cross-provider router)"
+              : defaultModel
+                ? `${defaultModel.providerID}/${defaultModel.modelID}`
+                : "server default"
 
-        // step 1 — provider (plus an AUTO shortcut)
-        const AUTO_LABEL = "🎬 auto (router)"
+        // step 1 — provider (plus AUTO and MIX shortcuts)
+        const AUTO_LABEL = "🎬 auto (1 provider)"
+        const MIX_LABEL = "🎚️ mix (cross-provider)"
         log("engine", `/model: provider step (providers: ${providers.map((p: any) => p.id).join(", ")})`)
         const provChoice = await responder.askQuestion({
           question: `🤖 Current: ${cur}\n\nPick a provider:`,
-          options: [AUTO_LABEL, ...providers.map((p: any) => String(p.id))],
+          options: [AUTO_LABEL, MIX_LABEL, ...providers.map((p: any) => String(p.id))],
         })
         log("engine", `/model: provider chosen = "${provChoice}"`)
         if (!provChoice) break // timed out / cancelled
+        if (provChoice === MIX_LABEL) {
+          if (config.model !== "mix") config.preMix = config.model
+          config.model = "mix"
+          saveGatewayConfig(config)
+          try {
+            const p = path.join(DIRECTORY, "opencode.jsonc")
+            const raw = readJsonc(p)
+            delete raw.model
+            fs.writeFileSync(p, JSON.stringify(raw, null, 2))
+          } catch { /* best-effort */ }
+          await responder.sendText("🎚️ MIX mode — cross-provider: easy → free, hard → best paid model. Configure with /mix.")
+          break
+        }
         if (provChoice === AUTO_LABEL) {
           config.model = "auto"
           config.effort = undefined // variant is model-specific; reset on model change
