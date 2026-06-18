@@ -206,6 +206,29 @@ try {
     Write-Ok "Piper voice skipped (optional) — you can run scripts\install-piper.ps1 later."
 }
 
+# 6b. ffmpeg — needed to sample frames from videos sent over chat so vision
+# models can "watch" them. Best-effort; video analysis warns the user if absent.
+Write-Step "Installing ffmpeg (video frame analysis)..."
+try {
+    $ffDir = Join-Path $DEST "ffmpeg"
+    $ffExe = Join-Path $ffDir "ffmpeg.exe"
+    if (Test-Path $ffExe) {
+        Write-Ok "ffmpeg already installed."
+    } else {
+        New-Item -ItemType Directory -Force $ffDir | Out-Null
+        $ffTmp = Join-Path $env:TEMP ("ffdl-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Force $ffTmp | Out-Null
+        Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile (Join-Path $ffTmp "ffmpeg.zip") -UseBasicParsing
+        Expand-Archive -Path (Join-Path $ffTmp "ffmpeg.zip") -DestinationPath $ffTmp -Force
+        $found = Get-ChildItem -Recurse $ffTmp -Filter "ffmpeg.exe" | Select-Object -First 1
+        if ($found) { Copy-Item -Force $found.FullName $ffExe }
+        Remove-Item -Recurse -Force $ffTmp -ErrorAction SilentlyContinue
+        Write-Ok "ffmpeg ready (video analysis enabled)."
+    }
+} catch {
+    Write-Ok "ffmpeg skipped (optional) — video analysis will warn until it's installed."
+}
+
 # 7. Native browser tool (Playwright MCP) — pre-download Chromium, best-effort.
 # The browser tool is on by default; the MCP server installs on first use, but
 # pre-fetching the browser here makes that first use instant.

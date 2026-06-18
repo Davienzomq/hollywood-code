@@ -895,11 +895,79 @@ export async function createEngine(config: GatewayConfig): Promise<{
     return { result } // both failed → surface the original failure
   }
 
+  // Whether a model can SEE images (vision). Read from config.providers()
+  // capabilities.input.image, cached per model.
+  const visionCache = new Map<string, boolean>()
+  const modelCanSeeImages = async (providerID?: string, modelID?: string): Promise<boolean> => {
+    if (!providerID || !modelID) return false
+    const key = `${providerID}/${modelID}`
+    if (visionCache.has(key)) return visionCache.get(key)!
+    let can = false
+    try {
+      const prov = await opencode.client.config.providers()
+      const providers: any[] = (prov.data as any)?.providers ?? []
+      const p = providers.find((x: any) => x.id === providerID)
+      const m = p?.models?.[modelID]
+      can = !!(m?.capabilities?.input?.image ?? m?.attachment ?? false)
+    } catch { /* unknown → assume no vision */ }
+    visionCache.set(key, can)
+    return can
+  }
+
+  // Video understanding = sample a few frames with ffmpeg and send them to a
+  // vision model as images (LLMs can't watch raw video; frames are the trick).
+  const resolveFfmpeg = (): string | undefined => {
+    const fromEnv = (process.env.HOLLYCODE_FFMPEG || "").trim()
+    if (fromEnv && fs.existsSync(fromEnv)) return fromEnv
+    const bundled = path.join(os.homedir(), ".hollycode", "ffmpeg", process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg")
+    if (fs.existsSync(bundled)) return bundled
+    return "ffmpeg" // hope it's on PATH; runFfmpeg() surfaces ENOENT if not
+  }
+  const runFfmpeg = (bin: string, args: string[]): Promise<void> =>
+    new Promise((resolve, reject) => {
+      let p: ChildProcess
+      try {
+        p = spawn(bin, args, { stdio: ["ignore", "ignore", "ignore"] })
+      } catch (e) {
+        reject(e instanceof Error ? e : new Error(String(e)))
+        return
+      }
+      p.on("error", reject)
+      p.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`))))
+    })
+  // Extract up to `count` frames as image data URLs. Returns [] (and logs) if
+  // ffmpeg is missing or fails, so the caller can warn the user.
+  const extractVideoFrames = async (videoPath: string, count = 4): Promise<string[]> => {
+    const bin = resolveFfmpeg()
+    if (!bin) return []
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "holly-vid-"))
+    try {
+      await runFfmpeg(bin, ["-y", "-i", videoPath, "-vf", "fps=1,scale=512:-1", "-frames:v", String(count), path.join(dir, "f_%03d.png")])
+      const files = fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith(".png")).sort().slice(0, count)
+      return files.map((f) => `data:image/png;base64,${fs.readFileSync(path.join(dir, f)).toString("base64")}`)
+    } catch (e: any) {
+      log("engine", `ffmpeg frame extraction failed: ${e?.message ?? e}`)
+      return []
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // handleMessage
   // ---------------------------------------------------------------------------
 
-  const handleMessage = async (channelId: string, msg: { conversationId: string; userId: string; text: string }, responder: Responder) => {
+  const handleMessage = async (
+    channelId: string,
+    msg: {
+      conversationId: string
+      userId: string
+      text: string
+      images?: Array<{ url: string; mime: string; filename?: string }>
+      videos?: Array<{ path: string; filename?: string }>
+    },
+    responder: Responder,
+  ) => {
     const sessionId = await getOrCreateSession(channelId, msg.conversationId)
     if (!sessionId) {
       await responder.sendText("Sorry, I couldn't create a session. Try /new.")
@@ -934,18 +1002,56 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
     const flavor = PERSONALITIES[personality]
     const goal = goalMap.get(sessionKey(channelId, msg.conversationId))
-    let promptText = flavor ? `[Personality: ${flavor}]\n\n${msg.text}` : msg.text
-    if (goal) promptText = `[Goal: ${goal} — keep working until this is fully met; do not stop early.]\n\n${promptText}`
     const pinnedModel = config.model !== "auto" ? defaultModel : undefined
-    if (verbose) log("engine", `handleMessage: goal=${goal ?? "none"} flavor=${personality}`)
-    log("engine", `handleMessage: "${msg.text.slice(0, 40)}" model=${pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "auto"} → prompting...`)
+
+    // Gather visual media as images: direct images + frames sampled from videos.
+    const mediaImages: Array<{ url: string; mime: string; filename?: string }> = [...(msg.images ?? [])]
+    if (msg.videos?.length) {
+      for (const v of msg.videos) {
+        const frames = await extractVideoFrames(v.path)
+        try { fs.rmSync(v.path, { force: true }) } catch { /* temp cleanup */ }
+        if (frames.length) {
+          frames.forEach((url, i) =>
+            mediaImages.push({ url, mime: "image/png", filename: `${v.filename ?? "video"}-frame${i + 1}.png` }),
+          )
+        } else {
+          await responder
+            .sendText(
+              "🎥 I couldn't read that video — frame extraction needs ffmpeg, which isn't installed. " +
+                "Install ffmpeg (or set HOLLYCODE_FFMPEG) and resend, or send a screenshot of the moment you care about.",
+            )
+            .catch(() => {})
+        }
+      }
+    }
+
+    let baseText = msg.text
+    if (!baseText && mediaImages.length) baseText = "(media attached — look at it and respond)"
+    let promptText = flavor ? `[Personality: ${flavor}]\n\n${baseText}` : baseText
+    if (goal) promptText = `[Goal: ${goal} — keep working until this is fully met; do not stop early.]\n\n${promptText}`
+
+    // Build prompt parts; attach media when the active model has vision.
+    const promptParts: any[] = [{ type: "text", text: promptText }]
+    if (mediaImages.length) {
+      // Pinned model: we know which model runs → check vision and warn if blind.
+      // Auto mode: the router picks server-side → attach and let a vision model handle it.
+      const canSee = pinnedModel ? await modelCanSeeImages(pinnedModel.providerID, pinnedModel.modelID) : true
+      if (canSee) {
+        for (const img of mediaImages) promptParts.push({ type: "file", mime: img.mime, filename: img.filename, url: img.url })
+      } else {
+        await responder
+          .sendText(
+            `👁️ ${pinnedModel!.providerID}/${pinnedModel!.modelID} can't see images/video. Switch to a vision model with /model, then resend.`,
+          )
+          .catch(() => {})
+      }
+    }
+
+    if (verbose) log("engine", `handleMessage: goal=${goal ?? "none"} flavor=${personality} media=${mediaImages.length}`)
+    log("engine", `handleMessage: "${msg.text.slice(0, 40)}" model=${pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "auto"} images=${msg.images?.length ?? 0} → prompting...`)
 
     const poller = setInterval(() => { void resolvePending(sessionId, responder) }, 3000)
-    const { result, fellBackTo } = await promptWithFallback(
-      sessionId,
-      [{ type: "text", text: promptText }],
-      pinnedModel,
-    )
+    const { result, fellBackTo } = await promptWithFallback(sessionId, promptParts, pinnedModel)
     clearInterval(poller)
     log("engine", `handleMessage: prompt returned (fellBackTo=${fellBackTo ?? "no"}, hasData=${!!result.data}, err=${!!(result as any).error})`)
     await resolvePending(sessionId, responder)

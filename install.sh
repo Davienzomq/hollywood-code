@@ -94,6 +94,24 @@ rm -f "$BUN_BIN/hollycode-uninstall"
 EOF
 chmod +x "$BUN_BIN/hollycode-uninstall"
 
+# ffmpeg — sample frames from videos sent over chat so vision models can "watch"
+# them. Best-effort; video analysis warns the user if it's missing.
+if ! command -v ffmpeg >/dev/null 2>&1 && [ ! -f "$DEST/ffmpeg/ffmpeg" ]; then
+  echo "Installing ffmpeg (video frame analysis)..."
+  mkdir -p "$DEST/ffmpeg"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    if command -v brew >/dev/null 2>&1; then brew install ffmpeg >/dev/null 2>&1 || true; fi
+  else
+    ffx="/tmp/ffmpeg-$$.tar.xz"
+    if curl -fsSL "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" -o "$ffx" 2>/dev/null; then
+      tar -xf "$ffx" -C /tmp 2>/dev/null || true
+      ffbin="$(find /tmp -maxdepth 2 -name ffmpeg -type f 2>/dev/null | head -1)"
+      if [ -n "$ffbin" ]; then cp "$ffbin" "$DEST/ffmpeg/ffmpeg" && chmod +x "$DEST/ffmpeg/ffmpeg"; fi
+      rm -f "$ffx"
+    fi
+  fi
+fi
+
 echo ""
 echo -e "${GREEN}✅ Hollycode installed!${NC}"
 echo ""

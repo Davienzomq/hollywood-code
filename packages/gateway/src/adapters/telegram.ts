@@ -1,4 +1,7 @@
 import { Bot, InputFile, type Context } from "grammy"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 import type { ChannelAdapter, GatewayContext, Responder, StatusHandle, IncomingMessage } from "../types"
 
 const TELEGRAM_MAX = 4096
@@ -376,6 +379,86 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
         } catch (err: any) {
           ctx.log("telegram", `voice handling failed: ${err?.message ?? err}`)
           await gramCtx.reply("🎤 Voice transcription failed.").catch(() => {})
+        }
+      })()
+    })
+
+    // ── Photo / image handler ───────────────────────────────────────────────
+    // Forward images to the model as data-URL file parts so vision-capable
+    // models can see them (the engine warns if the active model has no vision).
+    bot.on(["message:photo", "message:document"], (gramCtx: Context) => {
+      const m = gramCtx.message as any
+      const photos = m?.photo as Array<{ file_id: string }> | undefined
+      const doc = m?.document as { file_id: string; mime_type?: string; file_name?: string } | undefined
+      const isImageDoc = !!doc && typeof doc.mime_type === "string" && doc.mime_type.startsWith("image/")
+      if (!photos?.length && !isImageDoc) return // not an image — ignore (other docs unsupported)
+
+      void (async () => {
+        const chatId = gramCtx.chat!.id
+        const userId = gramCtx.from!.id.toString()
+        const caption: string = m?.caption ?? ""
+        const responder = makeResponder(chatId, gramCtx)
+        try {
+          let mime = "image/jpeg"
+          let filename = "photo.jpg"
+          let fileId: string
+          if (photos?.length) {
+            fileId = photos[photos.length - 1]!.file_id // largest size
+          } else {
+            fileId = doc!.file_id
+            mime = doc!.mime_type!
+            filename = doc!.file_name ?? "image"
+          }
+          const file = await gramCtx.api.getFile(fileId)
+          const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`
+          const buf = Buffer.from(await (await fetch(url)).arrayBuffer())
+          const dataUrl = `data:${mime};base64,${buf.toString("base64")}`
+          const incomingMsg: IncomingMessage = {
+            conversationId: chatId.toString(),
+            userId,
+            text: caption,
+            images: [{ url: dataUrl, mime, filename }],
+          }
+          await ctx.handleMessage("telegram", incomingMsg, responder)
+        } catch (err: any) {
+          ctx.log("telegram", `image handling failed: ${err?.message ?? err}`)
+          try { await responder.sendText(`⚠️ Couldn't read that image: ${err?.message ?? err}`) } catch { /* ignore */ }
+        }
+      })()
+    })
+
+    // ── Video / animation handler ───────────────────────────────────────────
+    // Download the clip to a temp file; the engine samples frames (ffmpeg) and
+    // sends them to a vision model, or warns if it can't.
+    bot.on(["message:video", "message:animation"], (gramCtx: Context) => {
+      const m = gramCtx.message as any
+      const vid = (m?.video ?? m?.animation) as { file_id: string; file_name?: string; mime_type?: string } | undefined
+      if (!vid?.file_id) return
+      void (async () => {
+        const chatId = gramCtx.chat!.id
+        const userId = gramCtx.from!.id.toString()
+        const caption: string = m?.caption ?? ""
+        const responder = makeResponder(chatId, gramCtx)
+        let tmpPath: string | undefined
+        try {
+          const file = await gramCtx.api.getFile(vid.file_id)
+          const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`
+          const buf = Buffer.from(await (await fetch(url)).arrayBuffer())
+          const ext = (vid.file_name?.match(/\.[a-z0-9]+$/i)?.[0] || ".mp4").toLowerCase()
+          const dir = fs.mkdtempSync(path.join(os.tmpdir(), "holly-tg-vid-"))
+          tmpPath = path.join(dir, `video${ext}`)
+          fs.writeFileSync(tmpPath, buf)
+          const incomingMsg: IncomingMessage = {
+            conversationId: chatId.toString(),
+            userId,
+            text: caption,
+            videos: [{ path: tmpPath, filename: vid.file_name ?? "video" }],
+          }
+          await ctx.handleMessage("telegram", incomingMsg, responder)
+        } catch (err: any) {
+          ctx.log("telegram", `video handling failed: ${err?.message ?? err}`)
+          try { await responder.sendText(`⚠️ Couldn't read that video: ${err?.message ?? err}`) } catch { /* ignore */ }
+          if (tmpPath) try { fs.rmSync(tmpPath, { force: true }) } catch { /* ignore */ }
         }
       })()
     })

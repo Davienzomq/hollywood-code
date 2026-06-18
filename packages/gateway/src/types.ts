@@ -19,6 +19,10 @@ export interface IncomingMessage {
   text: string
   /** True when this message arrived as a voice note — the reply may be spoken back. */
   audio?: boolean
+  /** Image attachments (e.g. Telegram photos), as data URLs for the vision model. */
+  images?: Array<{ url: string; mime: string; filename?: string }>
+  /** Video attachments (local temp file paths); frames are sampled for vision. */
+  videos?: Array<{ path: string; filename?: string }>
 }
 
 /** A permission request the agent raised mid-task, surfaced to the user. */
