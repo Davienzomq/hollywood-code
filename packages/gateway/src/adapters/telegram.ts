@@ -239,7 +239,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       // Diagnostic / context commands
       "doctor", "rewind", "permissions", "context",
       // v3 utility commands
-      "debug", "goal", "loop",
+      "debug", "goal", "loop", "autocompact",
     ] as const
 
     for (const cmd of commands) {
@@ -297,6 +297,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
         { command: "rewind", description: "Roll back to a past user message" },
         { command: "permissions", description: "View/edit per-tool permission rules" },
         { command: "context", description: "Show context-window token usage" },
+        { command: "autocompact", description: "Auto-compact threshold (default 95%) / on|off" },
       ])
       // Clear any stale narrower scope so the default menu we just set wins in
       // private chats too. Telegram resolves the most specific scope first, so a

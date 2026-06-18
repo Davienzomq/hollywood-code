@@ -334,6 +334,30 @@ export function Session() {
     }
   })
 
+  // Auto-compaction toast. The engine compacts automatically when the context
+  // crosses the configured threshold (default 95%). The session status already
+  // shows "compacting"; this adds an explicit toast so it's unmistakable.
+  const compactStartedSeen = new Set<string>()
+  const compactEndedSeen = new Set<string>()
+  event.on("message.updated", (evt) => {
+    const info = evt.properties.info as any
+    if (info?.sessionID !== route.sessionID) return
+    if (info.role !== "assistant") return
+    const isSummary = info.summary === true || info.mode === "compaction" || info.agent === "compaction"
+    if (!isSummary) return
+    if (!compactStartedSeen.has(info.id)) {
+      compactStartedSeen.add(info.id)
+      toast.show({ message: "Auto-compacting — context near the limit; summarizing…", variant: "info" })
+    }
+    if ((info.finish || info.error) && !compactEndedSeen.has(info.id)) {
+      compactEndedSeen.add(info.id)
+      toast.show({
+        message: info.error ? "Auto-compaction failed — try /new if too large" : "Auto-compacted — context freed",
+        variant: info.error ? "error" : "success",
+      })
+    }
+  })
+
   let seeded = false
   let scroll: ScrollBoxRenderable
   let prompt: PromptRef | undefined

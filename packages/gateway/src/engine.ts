@@ -338,8 +338,46 @@ export async function createEngine(config: GatewayConfig): Promise<{
     const sig = eventAbort.signal
     void (async () => {
       const events = await opencode.client.event.subscribe()
+      const compactStarted = new Set<string>()
+      const compactEnded = new Set<string>()
       for await (const event of events.stream) {
         if (sig.aborted) break
+
+        // Auto-compaction notice. The engine compacts automatically when the
+        // context crosses the configured threshold (default 95%, like Claude
+        // Code). Surface it so the pause is understood as the bot keeping itself
+        // within the model's context limit. The compaction produces an assistant
+        // message flagged summary/compaction.
+        if (event.type === "message.updated") {
+          const info = (event.properties as any).info
+          const isSummary =
+            info &&
+            info.role === "assistant" &&
+            (info.summary === true || info.mode === "compaction" || info.agent === "compaction")
+          if (isSummary) {
+            const r = activeResponders.get(info.sessionID)
+            if (r) {
+              if (!compactStarted.has(info.id)) {
+                compactStarted.add(info.id)
+                await r
+                  .sendText("📦 Auto-compacting — context reached the limit; summarizing older messages to keep going…")
+                  .catch(() => {})
+              }
+              if ((info.finish || info.error) && !compactEnded.has(info.id)) {
+                compactEnded.add(info.id)
+                await r
+                  .sendText(
+                    info.error
+                      ? "⚠️ Auto-compaction hit an error — try /new if the session is too large."
+                      : "✅ Auto-compacted — context freed, continuing.",
+                  )
+                  .catch(() => {})
+              }
+            }
+          }
+          continue
+        }
+
         if (event.type !== "message.part.updated") continue
         const part = event.properties.part as ToolPart
         if (part.type !== "tool" || part.state.status !== "completed") continue
@@ -1942,6 +1980,66 @@ export async function createEngine(config: GatewayConfig): Promise<{
         await responder.sendText(
           `🔐 Tool permissions in ${cfgPath}:\n${rows.join("\n")}\n\nUsage: /permissions <tool> <allow|ask|deny>`,
         )
+        break
+      }
+
+      // --- autocompact ---
+      case "autocompact": {
+        const cfgPath = path.join(DIRECTORY, "opencode.jsonc")
+        const a = args.trim().toLowerCase()
+        const readCompaction = (): Record<string, any> => {
+          try {
+            if (fs.existsSync(cfgPath)) {
+              const raw = readJsonc(cfgPath)
+              return (raw.compaction && typeof raw.compaction === "object" ? raw.compaction : {}) as Record<string, any>
+            }
+          } catch { /* ignore */ }
+          return {}
+        }
+        const writeCompaction = (patch: Record<string, any>) => {
+          const raw = fs.existsSync(cfgPath) ? readJsonc(cfgPath) : { $schema: "https://opencode.ai/config.json" }
+          if (!raw.compaction || typeof raw.compaction !== "object") raw.compaction = {}
+          Object.assign(raw.compaction, patch)
+          fs.writeFileSync(cfgPath, JSON.stringify(raw, null, 2))
+        }
+
+        if (!a) {
+          const c = readCompaction()
+          const auto = c.auto === false ? "OFF" : "ON"
+          const pct = typeof c.threshold_percent === "number" ? Math.round(c.threshold_percent * 100) : 95
+          await responder.sendText(
+            `🤏 Auto-compact is ${auto}\n  Threshold: ${pct}% of the model's context limit${typeof c.threshold_percent === "number" ? "" : " (default)"}\n\nUsage:\n  /autocompact <50-99>  set threshold %\n  /autocompact off|on   disable/enable`,
+          )
+          break
+        }
+        try {
+          if (a === "off") {
+            writeCompaction({ auto: false })
+            await responder.sendText("🤏 Auto-compact disabled. ⚠️ Restart the server to apply (/autoallow off then on).")
+            break
+          }
+          if (a === "on") {
+            writeCompaction({ auto: true })
+            await responder.sendText("🤏 Auto-compact enabled. ⚠️ Restart the server to apply (/autoallow off then on).")
+            break
+          }
+          let n = Number(a)
+          if (!Number.isFinite(n)) {
+            await responder.sendText("Usage: /autocompact <50-99> | off | on")
+            break
+          }
+          if (n > 1) n = n / 100 // accept 95 or 0.95
+          if (n < 0.5 || n > 0.99) {
+            await responder.sendText("Threshold must be between 50% and 99% (e.g. /autocompact 95).")
+            break
+          }
+          writeCompaction({ auto: true, threshold_percent: n })
+          await responder.sendText(
+            `🤏 Auto-compact threshold set to ${Math.round(n * 100)}% of the context limit.\n⚠️ Restart the server to apply (/autoallow off then on).`,
+          )
+        } catch (err: any) {
+          await responder.sendText(`⚠️ Could not update opencode.jsonc: ${err?.message ?? err}`)
+        }
         break
       }
 
