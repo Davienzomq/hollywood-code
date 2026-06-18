@@ -687,6 +687,26 @@ export async function createEngine(config: GatewayConfig): Promise<{
       .catch(() => {})
   }
 
+  // Reboot the embedded server IN PLACE (same directory, same sessions). The
+  // opencode server reads config once at boot into an InstanceState, so a config
+  // change (e.g. /autocompact) only takes effect after a reboot. Unlike switchDir
+  // this preserves the in-memory sessionMap so the active conversation continues
+  // seamlessly (sessions live on disk and reload by id under the new server).
+  const reloadServer = async (): Promise<boolean> => {
+    try {
+      try { server.close() } catch { /* already gone */ }
+      server = await bootServer(DIRECTORY)
+      opencode = { client: createOpencodeClient({ baseUrl: server.url }) }
+      opencodeV2 = createV2Client({ baseUrl: server.url })
+      startEvents()
+      log("engine", `reloadServer: rebooted at ${server.url}`)
+      return true
+    } catch (err: any) {
+      log("engine", `reloadServer failed: ${err?.message ?? err}`)
+      return false
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // promptWithFallback — run a prompt and, if the selected model fails (request
   // error or a provider error part like "insufficient credits"), retry once on
@@ -2015,12 +2035,16 @@ export async function createEngine(config: GatewayConfig): Promise<{
         try {
           if (a === "off") {
             writeCompaction({ auto: false })
-            await responder.sendText("🤏 Auto-compact disabled. ⚠️ Restart the server to apply (/autoallow off then on).")
+            await responder.sendText("🤏 Auto-compact disabled. Applying…")
+            const ok = await reloadServer()
+            await responder.sendText(ok ? "✅ Applied." : "⚠️ Saved, but reload failed — restart to apply.")
             break
           }
           if (a === "on") {
             writeCompaction({ auto: true })
-            await responder.sendText("🤏 Auto-compact enabled. ⚠️ Restart the server to apply (/autoallow off then on).")
+            await responder.sendText("🤏 Auto-compact enabled. Applying…")
+            const ok = await reloadServer()
+            await responder.sendText(ok ? "✅ Applied." : "⚠️ Saved, but reload failed — restart to apply.")
             break
           }
           let n = Number(a)
@@ -2034,9 +2058,9 @@ export async function createEngine(config: GatewayConfig): Promise<{
             break
           }
           writeCompaction({ auto: true, threshold_percent: n })
-          await responder.sendText(
-            `🤏 Auto-compact threshold set to ${Math.round(n * 100)}% of the context limit.\n⚠️ Restart the server to apply (/autoallow off then on).`,
-          )
+          await responder.sendText(`🤏 Auto-compact threshold set to ${Math.round(n * 100)}% of the context limit. Applying…`)
+          const ok = await reloadServer()
+          await responder.sendText(ok ? "✅ Applied — no restart needed." : "⚠️ Saved, but reload failed — restart to apply.")
         } catch (err: any) {
           await responder.sendText(`⚠️ Could not update opencode.jsonc: ${err?.message ?? err}`)
         }
