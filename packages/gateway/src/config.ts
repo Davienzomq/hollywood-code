@@ -23,6 +23,10 @@ export interface GatewayConfig {
   mode?: "ask" | "auto-edit" | "plan" | "bypass" | "auto"
   /** Reasoning effort / model variant (provider-specific, e.g. high|max|minimal). */
   effort?: string
+  /** The active provider /model auto routes WITHIN (set from the last picked
+   *  model). Auto never crosses providers — it casts smaller/bigger models of
+   *  this same provider by task tier. Defaults to the free provider. */
+  autoProvider?: string
   /** One block per messaging channel. */
   channels: ChannelConfig[]
   /** Optional voice (Phase B): transcription (apiKey) + TTS (free local Piper or api).

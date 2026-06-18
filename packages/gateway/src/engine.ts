@@ -827,6 +827,105 @@ export async function createEngine(config: GatewayConfig): Promise<{
     return false // ask / plan → forward (plan agent already blocks edits)
   }
 
+  // --- Hollywood auto-router (stuntdouble scoring, WITHIN the active provider) -
+  // Mirrors packages/opencode/src/hollywood/router.ts scoreMessage. In /model
+  // auto it scores each message and casts a model OF THE ACTIVE PROVIDER ONLY:
+  // cheap scenes → smaller model + lower effort, hard scenes → bigger model +
+  // higher effort. It NEVER mixes providers (that's a future "mix model" mode).
+  type Tier = "low" | "mid" | "high"
+  const HC_HIGH =
+    /\b(architect(ure)?|design\s+(a|the|an)?\s*(system|api|schema)|refactor|migrat(e|ion)|debug|race\s*condition|deadlock|concurren|optimi[sz]e|algorithm|security|vulnerab|authenticat|performance|scal(e|ing|ability)|implement|integrat(e|ion)|build\s+(a|an|the|me)|create\s+(a|an|the|me)|rewrite|overhaul)\b/i
+  const HC_LOW =
+    /^(hi|hey|hello|oi|ol[aá]|thanks?|thank you|valeu|obrigad[oa]|ok|sure|yes|no|nice|cool|legal|great|what( is|'s)|who( is|'s)|when|explain|summari[sz]e|translate|format|rename|list)\b/i
+  const HC_QUALITY = /\b(production|prod\b|critical|public\s+api|deploy|release|customer|security|payment|sensitive)\b/i
+  const HC_SPEED = /\b(quick(ly)?|fast|just|simple|simples|r[aá]pido|draft|rough|throwaway|prototype|test(ing)?\s+only)\b/i
+  const HC_FILE = /[\w./\\-]+\.(ts|tsx|js|jsx|py|go|rs|java|rb|css|html|json|yml|yaml|md|sql|sh|ps1|lua|c|cpp|h)\b/gi
+  const HC_CODE = /```|\n {4}\S/
+  const HC_STACK = /\b(at\s+\S+\s+\(|Traceback|Error:|exception|panic:)/i
+  const HC_MULTI = /\b(and|then|also|plus|e\s+depois|al[eé]m)\b/gi
+  const scoreTask = (text: string): { tier: Tier; score: number } => {
+    const t = text.trim()
+    const len = t.length
+    let complexity = 0.35
+    if (HC_LOW.test(t)) complexity = 0.1
+    if (HC_HIGH.test(t)) complexity = 0.75
+    if (HC_CODE.test(t) || HC_STACK.test(t)) complexity = Math.max(complexity, 0.55)
+    if ((t.match(HC_MULTI) ?? []).length >= 4 && len > 300) complexity = Math.min(1, complexity + 0.15)
+    let context = 0.1
+    if (len > 300) context = 0.3
+    if (len > 1000) context = 0.6
+    if (len > 4000) context = 0.9
+    if ((t.match(HC_FILE) ?? []).length >= 2) context = Math.min(1, context + 0.2)
+    let quality = 0.4
+    if (HC_QUALITY.test(t)) quality = 0.85
+    if (HC_LOW.test(t) && len < 200) quality = 0.2
+    const speed = HC_SPEED.test(t) ? 0.7 : 0
+    const score = Math.min(1, Math.max(0, 0.4 * complexity + 0.2 * context + 0.25 * quality - 0.15 * speed))
+    const tier: Tier = score <= 0.33 ? "low" : score <= 0.66 ? "mid" : "high"
+    return { tier, score }
+  }
+
+  // Per-provider casting table: smaller → bigger model by tier. Validated live
+  // against the provider's actual models; unavailable names are skipped.
+  const TIER_MODELS: Record<string, Record<Tier, string[]>> = {
+    openai: {
+      low: ["gpt-5.4-mini", "gpt-5-nano", "gpt-5-mini"],
+      mid: ["gpt-5.4", "gpt-5-mini", "gpt-5"],
+      high: ["gpt-5.5", "gpt-5.4-codex", "gpt-5.4", "gpt-5"],
+    },
+    anthropic: {
+      low: ["claude-haiku-4-5", "claude-3-5-haiku"],
+      mid: ["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4"],
+      high: ["claude-fable-5", "claude-opus-4-8", "claude-opus-4-5"],
+    },
+    google: {
+      low: ["gemini-3-flash", "gemini-2.5-flash"],
+      mid: ["gemini-3-pro", "gemini-2.5-pro"],
+      high: ["gemini-3-ultra", "gemini-ultra"],
+    },
+    opencode: {
+      low: ["claude-haiku-4-5", "deepseek-v4-flash-free", "big-pickle"],
+      mid: ["big-pickle", "qwen3-coder", "claude-sonnet-4-6"],
+      high: ["claude-fable-5", "claude-opus-4-8", "big-pickle"],
+    },
+  }
+  // Pick a reasoning-effort variant matching the tier from the model's available ones.
+  const pickEffort = (keys: string[], tier: Tier): string | undefined => {
+    if (!keys.length) return undefined
+    const pref =
+      tier === "low" ? ["low", "minimal", "none"] : tier === "mid" ? ["medium", "low", "high"] : ["xhigh", "high", "max", "medium"]
+    for (const p of pref) if (keys.includes(p)) return p
+    return tier === "high" ? keys[keys.length - 1] : keys[0]
+  }
+  // Cast a model + effort for the task, WITHIN the active provider only.
+  const castForAuto = async (
+    text: string,
+  ): Promise<{ model?: { providerID: string; modelID: string }; variant?: string; tier: Tier; score: number }> => {
+    const { tier, score } = scoreTask(text)
+    const providerID = config.autoProvider || freeModel?.providerID || "opencode"
+    try {
+      const prov = await opencode.client.config.providers()
+      const providers: any[] = (prov.data as any)?.providers ?? []
+      const p = providers.find((x: any) => x.id === providerID)
+      if (p?.models) {
+        const cands = TIER_MODELS[providerID]?.[tier] ?? []
+        for (const c of cands) {
+          if (p.models[c]) {
+            const variant = pickEffort(Object.keys(p.models[c]?.variants ?? {}), tier)
+            return { model: { providerID, modelID: c }, variant, tier, score }
+          }
+        }
+        // No tier candidate available → stay IN-PROVIDER with its first model.
+        const first = Object.keys(p.models)[0]
+        if (first) {
+          const variant = pickEffort(Object.keys(p.models[first]?.variants ?? {}), tier)
+          return { model: { providerID, modelID: first }, variant, tier, score }
+        }
+      }
+    } catch { /* ignore */ }
+    return { model: freeModel, tier, score } // provider unavailable → free, no mixing
+  }
+
   // ---------------------------------------------------------------------------
   // promptWithFallback — run a prompt and, if the selected model fails (request
   // error or a provider error part like "insufficient credits"), retry once on
@@ -852,13 +951,16 @@ export async function createEngine(config: GatewayConfig): Promise<{
     sessionId: string,
     parts: any[],
     model: { providerID: string; modelID: string } | undefined,
+    variantOverride?: string,
   ): Promise<{ result: any; fellBackTo?: string }> => {
     const run = (m?: { providerID: string; modelID: string }) => {
       const body: any = { parts, agent: agentForMode(sessionId) }
       if (m) body.model = m
-      // Reasoning effort = model variant, a per-prompt field (set via /effort).
-      // Only applies to the pinned model, not the free fallback.
-      if (config.effort && m) body.variant = config.effort
+      // Reasoning effort = model variant, a per-prompt field. variantOverride wins
+      // (auto-router casts effort per task); else the pinned /effort. Free fallback
+      // (no model) carries no variant.
+      const variant = variantOverride ?? config.effort
+      if (variant && m) body.variant = variant
       return opencode.client.session
         .prompt({ path: { id: sessionId }, body })
         .catch((err: any) => ({ error: err, data: undefined }))
@@ -1002,7 +1104,19 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
     const flavor = PERSONALITIES[personality]
     const goal = goalMap.get(sessionKey(channelId, msg.conversationId))
-    const pinnedModel = config.model !== "auto" ? defaultModel : undefined
+    // In /model auto, the stuntdouble router scores THIS message and casts a
+    // model + effort WITHIN the active provider only (smaller/lower for easy,
+    // bigger/higher for hard). A pinned model always wins. The free fallback in
+    // promptWithFallback still covers a no-credit model.
+    let pinnedModel = config.model !== "auto" ? defaultModel : undefined
+    let autoTier: Tier | undefined
+    let autoVariant: string | undefined
+    if (config.model === "auto") {
+      const cast = await castForAuto(msg.text)
+      pinnedModel = cast.model
+      autoTier = cast.tier
+      autoVariant = cast.variant
+    }
 
     // Gather visual media as images: direct images + frames sampled from videos.
     const mediaImages: Array<{ url: string; mime: string; filename?: string }> = [...(msg.images ?? [])]
@@ -1030,11 +1144,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
     let promptText = flavor ? `[Personality: ${flavor}]\n\n${baseText}` : baseText
     if (goal) promptText = `[Goal: ${goal} — keep working until this is fully met; do not stop early.]\n\n${promptText}`
 
-    // Build prompt parts; attach media when the active model has vision.
+    // Build prompt parts; attach media when the active model has vision. Both
+    // pinned and auto resolve to a concrete model here, so the check is precise.
     const promptParts: any[] = [{ type: "text", text: promptText }]
     if (mediaImages.length) {
-      // Pinned model: we know which model runs → check vision and warn if blind.
-      // Auto mode: the router picks server-side → attach and let a vision model handle it.
       const canSee = pinnedModel ? await modelCanSeeImages(pinnedModel.providerID, pinnedModel.modelID) : true
       if (canSee) {
         for (const img of mediaImages) promptParts.push({ type: "file", mime: img.mime, filename: img.filename, url: img.url })
@@ -1051,7 +1164,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     log("engine", `handleMessage: "${msg.text.slice(0, 40)}" model=${pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "auto"} images=${msg.images?.length ?? 0} → prompting...`)
 
     const poller = setInterval(() => { void resolvePending(sessionId, responder) }, 3000)
-    const { result, fellBackTo } = await promptWithFallback(sessionId, promptParts, pinnedModel)
+    const { result, fellBackTo } = await promptWithFallback(sessionId, promptParts, pinnedModel, autoVariant)
     clearInterval(poller)
     log("engine", `handleMessage: prompt returned (fellBackTo=${fellBackTo ?? "no"}, hasData=${!!result.data}, err=${!!(result as any).error})`)
     await resolvePending(sessionId, responder)
@@ -1080,7 +1193,8 @@ export async function createEngine(config: GatewayConfig): Promise<{
     // Show the reasoning effort (variant) actually used, read from the server's
     // record of the turn — so the label reflects what ran, not just what we asked.
     const effortSuffix = info?.variant && info.variant !== "default" ? ` · ${info.variant}` : ""
-    const modelLabel = info?.modelID ? `🎬 ${info.providerID}/${info.modelID}${effortSuffix}` : "🎬 done"
+    const tierSuffix = autoTier ? ` · auto:${autoTier}` : ""
+    const modelLabel = info?.modelID ? `🎬 ${info.providerID}/${info.modelID}${effortSuffix}${tierSuffix}` : "🎬 done"
 
     if (reply) {
       await statusHandle.finalize(modelLabel).catch(() => {})
@@ -1788,9 +1902,9 @@ export async function createEngine(config: GatewayConfig): Promise<{
             fs.writeFileSync(p, JSON.stringify(raw, null, 2))
           } catch { /* best-effort */ }
           await responder.sendText(
-            "🎬 AUTO mode — the Hollywood router now casts each message:\n" +
-              "cheap chat → stunt double, hard tasks → the star.\n" +
-              "Each reply is labeled with the model that played.\n" +
+            `🎬 AUTO mode — the router casts each message within ${config.autoProvider ?? "your provider"}:\n` +
+              "easy chat → smaller model + low effort, hard tasks → bigger model + high effort.\n" +
+              "Each reply is labeled with the model + tier that played.\n" +
               "Pin again anytime with /model providerID/modelID",
           )
           break
@@ -1801,6 +1915,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
           defaultModel = { providerID: parts[0]!, modelID: parts.slice(1).join("/") }
           config.model = args
           config.effort = undefined // variant is model-specific; reset on model change
+          config.autoProvider = parts[0]! // /model auto routes within this provider
           saveGatewayConfig(config)
           await opencode.client.config.update({ body: { model: args } as any }).catch(() => {})
           syncModelToFile(args)
@@ -1842,7 +1957,9 @@ export async function createEngine(config: GatewayConfig): Promise<{
             delete raw.model
             fs.writeFileSync(p, JSON.stringify(raw, null, 2))
           } catch { /* best-effort */ }
-          await responder.sendText("🎬 AUTO mode — the router casts each message (free unless a task needs more).")
+          await responder.sendText(
+            `🎬 AUTO mode — the router casts each message within ${config.autoProvider ?? "your provider"} (smaller model for easy, bigger for hard).`,
+          )
           break
         }
         const picked = providers.find((p: any) => String(p.id) === provChoice)
@@ -1861,6 +1978,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
         defaultModel = { providerID: provChoice, modelID: modelChoice }
         config.model = chosen
         config.effort = undefined // variant is model-specific; reset on model change
+        config.autoProvider = provChoice // /model auto routes within this provider
         saveGatewayConfig(config)
         await opencode.client.config.update({ body: { model: chosen } as any }).catch(() => {})
         syncModelToFile(chosen)
