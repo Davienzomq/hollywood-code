@@ -856,6 +856,9 @@ export async function createEngine(config: GatewayConfig): Promise<{
     const run = (m?: { providerID: string; modelID: string }) => {
       const body: any = { parts, agent: agentForMode(sessionId) }
       if (m) body.model = m
+      // Reasoning effort = model variant, a per-prompt field (set via /effort).
+      // Only applies to the pinned model, not the free fallback.
+      if (config.effort && m) body.variant = config.effort
       return opencode.client.session
         .prompt({ path: { id: sessionId }, body })
         .catch((err: any) => ({ error: err, data: undefined }))
@@ -958,7 +961,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     }
 
     const data = result.data as any
-    const info = data.info as { modelID?: string; providerID?: string } | undefined
+    const info = data.info as { modelID?: string; providerID?: string; variant?: string } | undefined
     const parts = data.parts as Array<{ type: string; text?: string }> | undefined
 
     const reply =
@@ -968,7 +971,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
         .join("\n")
         .trim() || ""
 
-    const modelLabel = info?.modelID ? `🎬 ${info.providerID}/${info.modelID}` : "🎬 done"
+    // Show the reasoning effort (variant) actually used, read from the server's
+    // record of the turn — so the label reflects what ran, not just what we asked.
+    const effortSuffix = info?.variant && info.variant !== "default" ? ` · ${info.variant}` : ""
+    const modelLabel = info?.modelID ? `🎬 ${info.providerID}/${info.modelID}${effortSuffix}` : "🎬 done"
 
     if (reply) {
       await statusHandle.finalize(modelLabel).catch(() => {})
@@ -1576,28 +1582,26 @@ export async function createEngine(config: GatewayConfig): Promise<{
       // --- effort / variants (reasoning effort = model variant) ---
       case "effort":
       case "variants": {
-        // List models via the v2 API, find the current model, and show its variants.
-        const modelRes = await opencodeV2.v2.model.list().catch(() => null)
-        // model.list() returns { data: { location, data: ModelV2Info[] } } — the
-        // array is nested under .data.data, not .data.
-        const md: any = modelRes?.data as any
-        const allModels: any[] = Array.isArray(md) ? md : (md?.data ?? [])
         const curModel = defaultModel
-        const modelEntry = curModel
-          ? allModels.find(
-              (m: any) =>
-                m.id === curModel.modelID ||
-                (m.providerID === curModel.providerID && (m.id === curModel.modelID || m.modelID === curModel.modelID)),
-            )
-          : undefined
-        const variants: Array<{ id: string }> = modelEntry?.variants ?? []
-        if (!variants.length) {
+        if (!curModel) {
+          await responder.sendText("Pin a model first with /model, then set its reasoning effort.")
+          break
+        }
+        // IMPORTANT: read effort levels from config.providers() (v1) — these are the
+        // reasoning-effort variants (none/low/medium/high/xhigh). The v2 model.list()
+        // exposes a DIFFERENT "variants" (service tiers like "fast"), which is not
+        // what /effort means.
+        const prov = await opencode.client.config.providers().catch(() => null)
+        const providers: any[] = (prov?.data as any)?.providers ?? []
+        const provEntry = providers.find((x: any) => x.id === curModel.providerID)
+        const variantsObj: Record<string, any> = provEntry?.models?.[curModel.modelID]?.variants ?? {}
+        const options = Object.keys(variantsObj)
+        if (!options.length) {
           await responder.sendText(
-            `ℹ️ No effort levels (variants) available for ${curModel ? `${curModel.providerID}/${curModel.modelID}` : "the current model"}.`,
+            `ℹ️ No reasoning effort levels for ${curModel.providerID}/${curModel.modelID}.`,
           )
           break
         }
-        const options = variants.map((v: any) => String(v.id))
         // Accept a direct arg (e.g. /effort high); otherwise show a picker.
         let chosen: string | undefined
         const a = args.trim().toLowerCase()
@@ -1611,21 +1615,13 @@ export async function createEngine(config: GatewayConfig): Promise<{
           chosen = await responder.askQuestion({ question: "🎚️ Pick reasoning effort:", options })
           if (!chosen) break // timed out / cancelled
         }
-        try {
-          const p = path.join(DIRECTORY, "opencode.jsonc")
-          const raw = fs.existsSync(p) ? readJsonc(p) : { $schema: "https://opencode.ai/config.json" }
-          if (typeof raw.model === "object" && raw.model !== null) {
-            raw.model.variant = chosen
-          } else {
-            raw.model = { id: curModel?.modelID, providerID: curModel?.providerID, variant: chosen }
-          }
-          fs.writeFileSync(p, JSON.stringify(raw, null, 2))
-        } catch { /* best-effort */ }
+        // The variant is a per-prompt runtime choice (passed in the prompt body),
+        // NOT a config field — `model` in opencode.jsonc must be a string. Just
+        // store it; promptWithFallback attaches it to each prompt. No config
+        // write, no reload (this is what avoided the earlier config corruption).
         config.effort = chosen
         saveGatewayConfig(config)
-        await responder.sendText(`🎚️ Effort set to: ${chosen}. Applying…`)
-        const ok = await reloadServer()
-        await responder.sendText(ok ? "✅ Applied — no restart needed." : "⚠️ Saved, but reload failed — restart to apply.")
+        await responder.sendText(`🎚️ Effort set to: ${chosen} — applies to your next message.`)
         break
       }
 
@@ -1677,6 +1673,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
       case "model": {
         if (args === "auto") {
           config.model = "auto"
+          config.effort = undefined // variant is model-specific; reset on model change
           saveGatewayConfig(config)
           try {
             const p = path.join(DIRECTORY, "opencode.jsonc")
@@ -1697,6 +1694,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
           if (parts.length < 2) { await responder.sendText("Invalid format. Use: /model providerID/modelID (or /model auto)"); break }
           defaultModel = { providerID: parts[0]!, modelID: parts.slice(1).join("/") }
           config.model = args
+          config.effort = undefined // variant is model-specific; reset on model change
           saveGatewayConfig(config)
           await opencode.client.config.update({ body: { model: args } as any }).catch(() => {})
           syncModelToFile(args)
@@ -1730,6 +1728,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
         if (!provChoice) break // timed out / cancelled
         if (provChoice === AUTO_LABEL) {
           config.model = "auto"
+          config.effort = undefined // variant is model-specific; reset on model change
           saveGatewayConfig(config)
           try {
             const p = path.join(DIRECTORY, "opencode.jsonc")
@@ -1755,6 +1754,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
         const chosen = `${provChoice}/${modelChoice}`
         defaultModel = { providerID: provChoice, modelID: modelChoice }
         config.model = chosen
+        config.effort = undefined // variant is model-specific; reset on model change
         saveGatewayConfig(config)
         await opencode.client.config.update({ body: { model: chosen } as any }).catch(() => {})
         syncModelToFile(chosen)
