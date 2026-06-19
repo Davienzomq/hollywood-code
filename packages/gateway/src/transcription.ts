@@ -129,11 +129,15 @@ function run(bin: string, args: string[]): Promise<void> {
 // Free, fully-local STT: ffmpeg converts the voice note to 16 kHz mono WAV, then
 // whisper.cpp transcribes it. No API key, works offline. Binaries + model are
 // bundled by the installer under ~/.hollycode/{whisper,ffmpeg}.
+// Binary names differ by OS — only Windows uses the .exe suffix. Hardcoding
+// .exe broke local STT on macOS/Linux (the bins are "main" and "ffmpeg").
+const EXE = process.platform === "win32" ? ".exe" : ""
+
 function createLocalTranscriber(cfg: VoiceConfig): Transcriber {
   const home = os.homedir()
-  const whisperBin = cfg.whisperBin || path.join(home, ".hollycode", "whisper", "main.exe")
+  const whisperBin = cfg.whisperBin || path.join(home, ".hollycode", "whisper", `main${EXE}`)
   const whisperModel = cfg.whisperModel || path.join(home, ".hollycode", "whisper", "model.bin")
-  const ffmpegBin = cfg.ffmpegBin || path.join(home, ".hollycode", "ffmpeg", "ffmpeg.exe")
+  const ffmpegBin = cfg.ffmpegBin || path.join(home, ".hollycode", "ffmpeg", `ffmpeg${EXE}`)
   return {
     async transcribe(audio: Uint8Array, _filename: string): Promise<string> {
       const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -157,9 +161,9 @@ function createLocalTranscriber(cfg: VoiceConfig): Transcriber {
 /** Local whisper.cpp is available if its binary + model + ffmpeg are present. */
 export function localSttAvailable(cfg?: VoiceConfig): boolean {
   const home = os.homedir()
-  const wb = cfg?.whisperBin || path.join(home, ".hollycode", "whisper", "main.exe")
+  const wb = cfg?.whisperBin || path.join(home, ".hollycode", "whisper", `main${EXE}`)
   const wm = cfg?.whisperModel || path.join(home, ".hollycode", "whisper", "model.bin")
-  const fb = cfg?.ffmpegBin || path.join(home, ".hollycode", "ffmpeg", "ffmpeg.exe")
+  const fb = cfg?.ffmpegBin || path.join(home, ".hollycode", "ffmpeg", `ffmpeg${EXE}`)
   return fs.existsSync(wb) && fs.existsSync(wm) && fs.existsSync(fb)
 }
 

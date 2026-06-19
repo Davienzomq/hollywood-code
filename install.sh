@@ -112,6 +112,42 @@ if ! command -v ffmpeg >/dev/null 2>&1 && [ ! -f "$DEST/ffmpeg/ffmpeg" ]; then
   fi
 fi
 
+# whisper.cpp — offline voice-note transcription (no API key). Best-effort, never
+# fails the install. macOS: brew (symlinked so its dylibs resolve). Linux: build
+# from source if git+make/cmake exist. Otherwise the bot falls back to a voice
+# API key (set in the setup wizard). The gateway looks for $DEST/whisper/main.
+if [ ! -f "$DEST/whisper/main" ] || [ ! -f "$DEST/whisper/model.bin" ]; then
+  echo "Installing offline voice transcription (whisper.cpp)..."
+  mkdir -p "$DEST/whisper"
+  # model — small multilingual (~150MB); a larger one can be swapped in later
+  if [ ! -f "$DEST/whisper/model.bin" ]; then
+    curl -fsSL "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" -o "$DEST/whisper/model.bin" 2>/dev/null || true
+  fi
+  # binary → $DEST/whisper/main
+  if [ ! -f "$DEST/whisper/main" ]; then
+    if [ "$(uname -s)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+      brew install whisper-cpp >/dev/null 2>&1 || true
+      wbin="$(command -v whisper-cli 2>/dev/null || command -v whisper-cpp 2>/dev/null || true)"
+      # symlink (not copy) so the Homebrew binary keeps its rpath to its dylibs
+      if [ -n "$wbin" ]; then ln -sf "$wbin" "$DEST/whisper/main"; fi
+    elif command -v git >/dev/null 2>&1 && { command -v make >/dev/null 2>&1 || command -v cmake >/dev/null 2>&1; }; then
+      wsrc="/tmp/wcpp-$$"
+      if git clone --depth 1 https://github.com/ggerganov/whisper.cpp "$wsrc" >/dev/null 2>&1; then
+        ( cd "$wsrc" && make -j >/dev/null 2>&1 ) \
+          || ( cd "$wsrc" && cmake -B build >/dev/null 2>&1 && cmake --build build -j >/dev/null 2>&1 ) || true
+        wbuilt="$(find "$wsrc" -maxdepth 3 \( -name main -o -name whisper-cli \) -type f -perm -u+x 2>/dev/null | head -1)"
+        if [ -n "$wbuilt" ]; then cp "$wbuilt" "$DEST/whisper/main" && chmod +x "$DEST/whisper/main"; fi
+      fi
+      rm -rf "$wsrc"
+    fi
+  fi
+  if [ -f "$DEST/whisper/main" ] && [ -f "$DEST/whisper/model.bin" ]; then
+    echo "  Voice transcription ready (offline)."
+  else
+    echo "  Local whisper unavailable here — set a voice API key for transcription (setup wizard)."
+  fi
+fi
+
 echo ""
 echo -e "${GREEN}✅ Hollycode installed!${NC}"
 echo ""
