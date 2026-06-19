@@ -47,6 +47,7 @@ import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv"
+import { castMix } from "../../util/mix"
 import { createFadeIn } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
@@ -1105,13 +1106,22 @@ export function Prompt(props: PromptProps) {
         goalText
           ? [{ type: "text", text: `[Goal: ${goalText} — keep working until this is fully met; do not stop early.]`, synthetic: true }]
           : []
+      // Mix model: when ON, score THIS message and cast a model+effort across
+      // providers (overrides the selected model for this send only). Off → the
+      // user's selected model is used as-is.
+      const mixCast = kv.get("hollycode.mix", false)
+        ? castMix(inputText, sync.data.provider as any, kv.get("hollycode.mixTable") as any)
+        : undefined
+      const sendModel = mixCast ? { providerID: mixCast.providerID, modelID: mixCast.modelID } : selectedModel
+      const sendVariant = mixCast?.variant ?? variant
+      if (mixCast) toast.show({ message: `🎚️ mix → ${sendModel.providerID}/${sendModel.modelID} (${mixCast.tier})`, variant: "info" })
       sdk.client.session
         .prompt({
           sessionID,
-          ...selectedModel,
+          ...sendModel,
           agent: agent.name,
-          model: selectedModel,
-          variant,
+          model: sendModel,
+          variant: sendVariant,
           parts: [
             ...personalityParts,
             ...goalParts,

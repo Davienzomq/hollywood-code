@@ -712,7 +712,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       },
       {
         name: "variant.cycle",
-        title: "Variant cycle",
+        title: "Effort cycle",
         category: "Agent",
         run: () => {
           local.model.variant.cycle()
@@ -720,15 +720,18 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       },
       {
         name: "variant.list",
-        title: "Switch model variant",
+        title: "Switch reasoning effort",
         category: "Agent",
-        hidden: local.model.variant.list().length === 0,
-        slashName: "variants",
+        // Always show /effort (like the Telegram gateway) — it toasts "no effort
+        // levels" when the current model has none, instead of hiding the command.
+        // Renamed slash to /effort to match the gateway. The internal command
+        // name stays "variant.list" so keybinds and the model.variant API are untouched.
+        slashName: "effort",
         run: () => {
           if (local.model.variant.list().length === 0) {
             return toast.show({
-              title: "No variants available",
-              message: "The current model does not support any variants.",
+              title: "No effort levels available",
+              message: "The current model does not support reasoning effort levels.",
               variant: "info",
             })
           }
@@ -1078,6 +1081,50 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
             auto: "🤖 auto — best mode chosen per task",
           }
           toast.show({ message: labels[want], variant: "success" })
+          dialog.clear()
+        },
+      },
+      {
+        name: "hollycode.mix",
+        title: "Mix — cross-provider auto-router (on|off|set tiers)",
+        slashName: "mix",
+        category: "Agent",
+        run: async () => {
+          const on = kv.get("hollycode.mix", false) as boolean
+          const table = (kv.get("hollycode.mixTable", {}) as Record<string, string>) || {}
+          const choice = await DialogPrompt.show(
+            dialog,
+            `Mix is ${on ? "ON" : "OFF"} (low:${table.low ?? "auto"} mid:${table.mid ?? "auto"} high:${table.high ?? "auto"}). ` +
+              `Type: on, off, auto, or "low|mid|high provider/model"`,
+            { placeholder: on ? "off" : "on" },
+          )
+          const v = (choice ?? "").trim()
+          if (!v) return
+          const lower = v.toLowerCase()
+          if (lower === "on" || lower === "off") {
+            kv.set("hollycode.mix", lower === "on")
+            toast.show({
+              message: lower === "on" ? "🎚️ Mix ON — easy → free, hard → best paid (cross-provider)" : "🎚️ Mix OFF",
+              variant: "success",
+            })
+            dialog.clear()
+            return
+          }
+          if (lower === "auto") {
+            kv.set("hollycode.mixTable", {})
+            toast.show({ message: "🎚️ Mix table reset — all tiers auto-detected", variant: "success" })
+            dialog.clear()
+            return
+          }
+          const parts = v.split(/\s+/)
+          const tier = parts[0]?.toLowerCase()
+          const ref = parts.slice(1).join(" ")
+          if (!["low", "mid", "high"].includes(tier ?? "") || !ref.includes("/")) {
+            toast.show({ message: 'Usage: on | off | auto | "low|mid|high provider/model"', variant: "info" })
+            return
+          }
+          kv.set("hollycode.mixTable", { ...table, [tier!]: ref })
+          toast.show({ message: `🎚️ Mix ${tier} → ${ref}${on ? "" : " (turn on with /mix on)"}`, variant: "success" })
           dialog.clear()
         },
       },

@@ -126,8 +126,8 @@ export const Definitions = {
   agent_list: keybind("<leader>a", "List agents"),
   agent_cycle: keybind("tab", "Next agent"),
   agent_cycle_reverse: keybind("shift+tab", "Previous agent"),
-  variant_cycle: keybind("ctrl+t", "Cycle model variants"),
-  variant_list: keybind("none", "List model variants"),
+  variant_cycle: keybind("ctrl+t", "Cycle reasoning effort"),
+  variant_list: keybind("none", "Switch reasoning effort"),
 
   messages_page_up: keybind("pageup,ctrl+alt+b", "Scroll messages up by one page"),
   messages_page_down: keybind("pagedown,ctrl+alt+f", "Scroll messages down by one page"),

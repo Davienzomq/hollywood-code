@@ -17,6 +17,7 @@ import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import { SkillSearchTool } from "./skill-search"
+import { McpAdminTool } from "./mcp-admin"
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
@@ -48,6 +49,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Agent } from "../agent/agent"
 import { Skill } from "../skill"
+import { MCP } from "@/mcp"
 import { Permission } from "@/permission"
 import { BackgroundJob } from "@/background/job"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -107,6 +109,7 @@ export const layer = Layer.effect(
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
     const skillsearchtool = yield* SkillSearchTool
+    const mcpadmintool = yield* McpAdminTool
     const agent = yield* Agent.Service
 
     const state = yield* InstanceState.make<State>(
@@ -211,6 +214,7 @@ export const layer = Layer.effect(
           search: Tool.init(websearch),
           skill: Tool.init(skilltool),
           skill_search: Tool.init(skillsearchtool),
+          mcp: Tool.init(mcpadmintool),
           patch: Tool.init(patchtool),
           question: Tool.init(question),
           lsp: Tool.init(lsptool),
@@ -234,6 +238,7 @@ export const layer = Layer.effect(
             tool.search,
             tool.skill,
             tool.skill_search,
+            tool.mcp,
             tool.patch,
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
@@ -327,6 +332,7 @@ export const defaultLayer = Layer.suspend(() =>
       Layer.provide(Question.defaultLayer),
       Layer.provide(Todo.defaultLayer),
       Layer.provide(Skill.defaultLayer),
+      Layer.provide(MCP.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),
       Layer.provide(BackgroundJob.defaultLayer),
@@ -426,6 +432,7 @@ export const node = LayerNode.make(layer.pipe(Layer.provide(Ripgrep.defaultLayer
   Todo.node,
   Agent.node,
   Skill.node,
+  MCP.node,
   Session.node,
   BackgroundJob.node,
   Provider.node,

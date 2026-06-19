@@ -1,0 +1,19 @@
+Manage MCP (Model Context Protocol) servers for this project when the user asks
+you to turn an integration on/off or add a new one.
+
+Actions:
+- list: show every configured MCP server and its live status (connected /
+  disabled / failed / needs_auth).
+- enable: connect a configured server by name and persist it (survives restart).
+- disable: disconnect a configured server by name and persist it.
+- add: register a NEW server and enable it. Provide "command" for a local
+  server (a shell command, e.g. "npx -y @playwright/mcp@latest") OR "url" for a
+  remote server. Only do this when the user explicitly asks to add that server.
+
+Notes:
+- Only act on a user's explicit request. Never enable/add a server on your own.
+- enable/disable/add persist to the project config (opencode.json / .jsonc), so
+  the choice is kept the next time the app starts.
+- After enabling, the server's tools become available to you in this session.
+- Some servers need an API key or external setup (e.g. HA_TOKEN, SPOTIFY_TOKEN,
+  FAL_KEY, ffmpeg). If a server reports "failed", relay the error to the user.

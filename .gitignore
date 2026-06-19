@@ -32,3 +32,6 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+# Landing page — deployed to Vercel directly; kept private, never tracked here
+landing/

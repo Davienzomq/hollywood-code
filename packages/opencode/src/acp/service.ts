@@ -99,9 +99,9 @@ export function make(input: {
     if (params.clientCapabilities?._meta?.["terminal-auth"] === true) {
       authMethod._meta = {
         "terminal-auth": {
-          command: "opencode",
+          command: "hollycode",
           args: ["auth", "login"],
-          label: "OpenCode Login",
+          label: "Hollycode Login",
         },
       }
     }
@@ -127,7 +127,7 @@ export function make(input: {
       },
       authMethods: [authMethod],
       agentInfo: {
-        name: "OpenCode",
+        name: "Hollycode",
         version: InstallationVersion,
       },
     }

@@ -15,6 +15,7 @@ import { Plugin } from "@/plugin"
 import { Question } from "@/question"
 import { Todo } from "@/session/todo"
 import { Skill } from "@/skill"
+import { MCP } from "@/mcp"
 import { Agent } from "@/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { Session } from "@/session/session"
@@ -54,6 +55,7 @@ const registryLayer = (opts: RegistryLayerOptions = {}) =>
       Layer.provide(Question.defaultLayer),
       Layer.provide(Todo.defaultLayer),
       Layer.provide(Skill.defaultLayer),
+      Layer.provide(MCP.defaultLayer),
       Layer.provide(Agent.defaultLayer),
       Layer.provide(Session.defaultLayer),
       Layer.provide(Layer.mergeAll(SessionStatus.defaultLayer, BackgroundJob.defaultLayer)),

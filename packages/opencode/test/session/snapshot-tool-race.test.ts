@@ -70,6 +70,7 @@ const mcp = Layer.succeed(
     prompts: () => Effect.succeed({}),
     resources: () => Effect.succeed({}),
     add: () => Effect.succeed({ status: { status: "disabled" as const } }),
+    addServer: () => Effect.void,
     connect: () => Effect.void,
     disconnect: () => Effect.void,
     getPrompt: () => Effect.succeed(undefined),

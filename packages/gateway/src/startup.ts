@@ -25,8 +25,12 @@ function runPwsh(script: string) {
 }
 
 // ---------- Windows: Task Scheduler task that fires at logon ----------
-function installWindows(directory: string) {
-  const workdir = directory && fs.existsSync(directory) ? directory : os.homedir()
+function installWindows(_directory: string) {
+  // The CWD must be a directory that ALWAYS exists, NOT the project dir: the
+  // project is read from the saved config at boot, and a project dir that later
+  // gets deleted/renamed would make Windows refuse to start the task with
+  // ERROR_DIRECTORY (0x8007010B). Home is stable.
+  const workdir = os.homedir()
   // The bare launcher self-detaches into a hidden background process, so the
   // scheduled task just needs to run it once at logon and exit.
   const script = [
@@ -61,7 +65,7 @@ function statusWindows() {
 
 // ---------- macOS: launchd LaunchAgent (RunAtLoad + KeepAlive) ----------
 const MAC_PLIST = path.join(os.homedir(), "Library", "LaunchAgents", "com.hollycode.remote.plist")
-function installMac(directory: string) {
+function installMac(_directory: string) {
   const logDir = path.join(os.homedir(), "Library", "Logs", "hollywood")
   fs.mkdirSync(path.dirname(MAC_PLIST), { recursive: true })
   fs.mkdirSync(logDir, { recursive: true })
@@ -78,7 +82,7 @@ function installMac(directory: string) {
     <string>${LAUNCHER}</string>
     <string>--foreground</string>
   </array>
-  <key>WorkingDirectory</key><string>${directory || os.homedir()}</string>
+  <key>WorkingDirectory</key><string>${os.homedir()}</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${path.join(logDir, "launchd.out.log")}</string>
@@ -112,7 +116,7 @@ function statusMac() {
 
 // ---------- Linux: systemd user service ----------
 const LINUX_UNIT = path.join(os.homedir(), ".config", "systemd", "user", "hollycode-remote.service")
-function installLinux(directory: string) {
+function installLinux(_directory: string) {
   fs.mkdirSync(path.dirname(LINUX_UNIT), { recursive: true })
   // systemd supervises the process, so run the gateway in the foreground.
   const unit = `[Unit]
@@ -122,7 +126,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=${directory || os.homedir()}
+WorkingDirectory=${os.homedir()}
 ExecStart=${BUN} run ${LAUNCHER} --foreground
 Restart=on-failure
 RestartSec=5

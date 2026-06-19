@@ -28,6 +28,9 @@ import { EventV2 } from "@opencode-ai/core/event"
 import { TuiEvent } from "@/server/tui-event"
 import open from "open"
 import { Cause, Effect, Exit, Layer, Option, Context, Schema, Stream } from "effect"
+import nodePath from "path"
+import nodeFs from "fs"
+import { modify, applyEdits, parse as parseJsonc } from "jsonc-parser"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
@@ -256,6 +259,7 @@ export interface Interface {
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: () => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
   readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }>
+  readonly addServer: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<void>
   readonly connect: (name: string) => Effect.Effect<void, NotFoundError>
   readonly disconnect: (name: string) => Effect.Effect<void, NotFoundError>
   readonly getPrompt: (
@@ -301,7 +305,7 @@ export const layer = Layer.effect(
         (t) =>
           Effect.tryPromise({
             try: () => {
-              const client = new Client({ name: "opencode", version: InstallationVersion })
+              const client = new Client({ name: "hollycode", version: InstallationVersion })
               return withTimeout(client.connect(t), timeout).then(() => client)
             },
             catch: (e) => (e instanceof Error ? e : new Error(String(e))),
@@ -392,7 +396,7 @@ export const layer = Layer.effect(
                 return events
                   .publish(TuiEvent.ToastShow, {
                     title: "MCP Authentication Required",
-                    message: `Server "${key}" requires authentication. Run: opencode mcp auth ${key}`,
+                    message: `Server "${key}" requires authentication. Run: hollycode mcp auth ${key}`,
                     variant: "warning",
                     duration: 8000,
                   })
@@ -428,7 +432,7 @@ export const layer = Layer.effect(
         cwd,
         env: {
           ...process.env,
-          ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
+          ...(cmd === "opencode" || cmd === "hollycode" ? { BUN_BE_BUN: "1" } : {}),
           ...mcp.environment,
         },
       })
@@ -657,9 +661,51 @@ export const layer = Layer.effect(
       return { status: s.status }
     })
 
+    // Persist MCP enable/disable to the project config so a toggle survives a
+    // server restart (the sidebar/`/mcp` toggle is otherwise in-memory only).
+    // We only touch files that already declare this server, and we touch every
+    // such file (a project may carry both opencode.json and opencode.jsonc).
+    const PROJECT_CONFIG_FILES = [
+      "opencode.jsonc",
+      "opencode.json",
+      nodePath.join(".opencode", "opencode.jsonc"),
+      nodePath.join(".opencode", "opencode.json"),
+    ]
+
+    const persistMcpEnabled = Effect.fnUntraced(function* (name: string, enabled: boolean) {
+      const dir = yield* InstanceState.directory
+      yield* Effect.tryPromise(async () => {
+        const files = PROJECT_CONFIG_FILES.map((f) => nodePath.join(dir, f)).filter((f) => nodeFs.existsSync(f))
+        for (const file of files) {
+          const text = await nodeFs.promises.readFile(file, "utf8")
+          const parsed = parseJsonc(text) as { mcp?: Record<string, unknown> } | undefined
+          if (!parsed?.mcp || !(name in parsed.mcp)) continue
+          const edits = modify(text, ["mcp", name, "enabled"], enabled, {
+            formattingOptions: { tabSize: 2, insertSpaces: true },
+          })
+          await nodeFs.promises.writeFile(file, applyEdits(text, edits))
+        }
+      }).pipe(Effect.ignore)
+    })
+
+    const persistMcpEntry = Effect.fnUntraced(function* (name: string, entry: ConfigMCPV1.Info) {
+      const dir = yield* InstanceState.directory
+      yield* Effect.tryPromise(async () => {
+        const file =
+          PROJECT_CONFIG_FILES.map((f) => nodePath.join(dir, f)).find((f) => nodeFs.existsSync(f)) ??
+          nodePath.join(dir, "opencode.json")
+        const text = nodeFs.existsSync(file) ? await nodeFs.promises.readFile(file, "utf8") : "{}"
+        const edits = modify(text, ["mcp", name], entry, {
+          formattingOptions: { tabSize: 2, insertSpaces: true },
+        })
+        await nodeFs.promises.writeFile(file, applyEdits(text, edits))
+      }).pipe(Effect.ignore)
+    })
+
     const connect = Effect.fn("MCP.connect")(function* (name: string) {
       const mcp = yield* requireMcpConfig(name)
       yield* createAndStore(name, { ...mcp, enabled: true })
+      yield* persistMcpEnabled(name, true)
     })
 
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
@@ -668,6 +714,14 @@ export const layer = Layer.effect(
       yield* closeClient(s, name)
       delete s.clients[name]
       s.status[name] = { status: "disabled" }
+      yield* persistMcpEnabled(name, false)
+    })
+
+    // Add (or replace) a server, persist the full entry to the project config,
+    // and connect it live. Used by the agent-facing `mcp` tool.
+    const addServer = Effect.fn("MCP.addServer")(function* (name: string, entry: ConfigMCPV1.Info) {
+      yield* persistMcpEntry(name, { ...entry, enabled: true })
+      yield* add(name, { ...entry, enabled: true })
     })
 
     const tools = Effect.fn("MCP.tools")(function* () {
@@ -850,7 +904,7 @@ export const layer = Layer.effect(
 
       return yield* Effect.tryPromise({
         try: () => {
-          const client = new Client({ name: "opencode", version: InstallationVersion })
+          const client = new Client({ name: "hollycode", version: InstallationVersion })
           return client
             .connect(transport)
             .then(() => ({ authorizationUrl: "", oauthState, client }) satisfies AuthResult)
@@ -978,6 +1032,7 @@ export const layer = Layer.effect(
       prompts,
       resources,
       add,
+      addServer,
       connect,
       disconnect,
       getPrompt,

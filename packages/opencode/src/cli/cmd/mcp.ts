@@ -120,7 +120,7 @@ export const McpListCommand = effectCmd({
 
     if (servers.length === 0) {
       prompts.log.warn("No MCP servers configured")
-      prompts.outro("Add servers with: opencode mcp add")
+      prompts.outro("Add servers with: hollycode mcp add")
       return
     }
 
@@ -753,7 +753,7 @@ export const McpDebugCommand = effectCmd({
             params: {
               protocolVersion: "2024-11-05",
               capabilities: {},
-              clientInfo: { name: "opencode-debug", version: InstallationVersion },
+              clientInfo: { name: "hollycode-debug", version: InstallationVersion },
             },
             id: 1,
           }),
@@ -796,7 +796,7 @@ export const McpDebugCommand = effectCmd({
 
           try {
             const client = new Client({
-              name: "opencode-debug",
+              name: "hollycode-debug",
               version: InstallationVersion,
             })
             await client.connect(transport)

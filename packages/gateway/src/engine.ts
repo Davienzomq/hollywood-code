@@ -272,13 +272,20 @@ export async function createEngine(config: GatewayConfig): Promise<{
     ...(config.tools ?? {}),
   }
 
-  const applyMcpConfig = () => {
+  const applyMcpConfig = (opts?: { force?: boolean }) => {
     try {
       const p = path.join(DIRECTORY, "opencode.jsonc")
       const raw = fs.existsSync(p) ? readJsonc(p) : { $schema: "https://opencode.ai/config.json" }
+      const prev = (raw.mcp ?? {}) as Record<string, { enabled?: boolean } | undefined>
       const mcp: Record<string, unknown> = {}
       for (const [id, def] of Object.entries(MCP_CATALOG)) {
-        mcp[id] = { type: def.type, command: def.command, enabled: toolsEnabled[id] !== false }
+        // On startup (no force) preserve a toggle the user already made — the TUI
+        // sidebar / `mcp` tool write `enabled` straight into this file. Only fall
+        // back to the gateway default when the server has no prior enabled state.
+        const prevEnabled = typeof prev[id]?.enabled === "boolean" ? prev[id]!.enabled : undefined
+        const enabled = opts?.force || prevEnabled === undefined ? toolsEnabled[id] !== false : prevEnabled!
+        mcp[id] = { type: def.type, command: def.command, enabled }
+        toolsEnabled[id] = enabled
       }
       raw.mcp = mcp
       fs.writeFileSync(p, JSON.stringify(raw, null, 2))
@@ -477,12 +484,14 @@ export async function createEngine(config: GatewayConfig): Promise<{
     for (const q of qs) {
       if (q.sessionID !== sid) continue
       const first = q.questions?.[0]
-      if (mode === "bypass" || !first?.options?.length) {
+      // A `question` is the agent explicitly asking the USER to choose — always
+      // deliver it (even in bypass mode, which only auto-approves permissions).
+      // The only case we can't render is a question with no options at all, so
+      // that degenerate case still auto-answers to avoid freezing the turn.
+      if (!first?.options?.length) {
         const answers: string[][] =
           q.questions?.map((qq: any) => (qq.options?.[0]?.label ? [qq.options[0].label] : ["ok"])) ?? []
-        await opencodeV2.v2.session.question
-          .reply({ sessionID: q.sessionID, requestID: q.id, questionV2Reply: { answers } })
-          .catch(() => {})
+        await opencodeV2.question.reply({ requestID: q.id, answers }).catch(() => {})
         continue
       }
       if (notified.has(q.id)) continue
@@ -499,9 +508,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
             const label = i === 0 ? qq.options?.[idx]?.label : qq.options?.[0]?.label
             return [label || "ok"]
           })
-          return opencodeV2.v2.session.question
-            .reply({ sessionID: q.sessionID, requestID: q.id, questionV2Reply: { answers } })
-            .catch(() => {})
+          return opencodeV2.question.reply({ requestID: q.id, answers }).catch(() => {})
         })
         .catch(() => {})
     }
@@ -523,7 +530,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     for (const q of (((qs?.data as any) ?? []) as any[])) {
       if (q.sessionID !== sid) continue
       const answers: string[][] = q.questions?.map((qq: any) => (qq.options?.[0]?.label ? [qq.options[0].label] : ["ok"])) ?? []
-      await opencodeV2.v2.session.question.reply({ sessionID: q.sessionID, requestID: q.id, questionV2Reply: { answers } }).catch(() => {})
+      await opencodeV2.question.reply({ requestID: q.id, answers }).catch(() => {})
     }
   }
 
@@ -1397,7 +1404,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     for (const q of (((qs?.data as any) ?? []) as any[])) {
       if (q.sessionID !== sessionId) continue
       const answers: string[][] = q.questions?.map((qq: any) => (qq.options?.[0]?.label ? [qq.options[0].label] : ["ok"])) ?? []
-      await opencodeV2.v2.session.question.reply({ sessionID: q.sessionID, requestID: q.id, questionV2Reply: { answers } }).catch(() => {})
+      await opencodeV2.question.reply({ requestID: q.id, answers }).catch(() => {})
     }
   }
 
@@ -2411,7 +2418,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
         toolsEnabled[id] = next
         config.tools = { ...toolsEnabled }
         saveGatewayConfig(config)
-        applyMcpConfig()
+        applyMcpConfig({ force: true })
         await responder.sendText(`♻️ Turning ${id} ${arg} — restarting server...`)
         try {
           server.close()
