@@ -45,7 +45,18 @@ try {
     Invoke-WebRequest -Uri $ZIP -OutFile (Join-Path $tmp "repo.zip") -UseBasicParsing
     Write-Step "Extracting to $DEST..."
     Expand-Archive -Path (Join-Path $tmp "repo.zip") -DestinationPath $tmp -Force
+
+    # Preserve heavy downloaded assets across the wipe (ffmpeg, whisper, piper) so
+    # `hollycode-update` doesn't re-download hundreds of MB every time — they live
+    # inside $DEST, which we're about to delete and re-extract.
+    $assets = @("ffmpeg", "whisper", "piper")
+    $preserve = Join-Path $tmp "preserve"
     if (Test-Path $DEST) {
+        New-Item -ItemType Directory -Force $preserve | Out-Null
+        foreach ($a in $assets) {
+            $src = Join-Path $DEST $a
+            if (Test-Path $src) { Move-Item -Force $src (Join-Path $preserve $a) }
+        }
         # Retry the wipe: if a hollycode.exe is still holding a lock, kill it and try again.
         $removed = $false
         for ($i = 0; $i -lt 5; $i++) {
@@ -60,6 +71,16 @@ try {
         }
     }
     Move-Item (Join-Path $tmp "hollywood-code-main") $DEST
+
+    # Restore the preserved assets into the fresh install (skips their re-download).
+    foreach ($a in $assets) {
+        $saved = Join-Path $preserve $a
+        if (Test-Path $saved) {
+            $target = Join-Path $DEST $a
+            if (Test-Path $target) { Remove-Item -Recurse -Force $target -ErrorAction SilentlyContinue }
+            Move-Item -Force $saved $target
+        }
+    }
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

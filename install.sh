@@ -34,8 +34,18 @@ tar -xzf "$tmp/repo.tar.gz" -C "$tmp"
 if [ -x "$BUN" ] && [ -f "$DEST/packages/gateway/bin/hollycode-gateway.ts" ]; then
   "$BUN" run "$DEST/packages/gateway/bin/hollycode-gateway.ts" --stop 2>/dev/null || true
 fi
+# Preserve heavy downloaded assets across the wipe (ffmpeg, whisper, piper) so
+# `hollycode-update` doesn't re-download them — they live inside $DEST.
+preserve="$tmp/preserve"; mkdir -p "$preserve"
+for a in ffmpeg whisper piper; do
+  [ -e "$DEST/$a" ] && mv "$DEST/$a" "$preserve/$a" 2>/dev/null || true
+done
 rm -rf "$DEST"
 mv "$tmp/hollywood-code-main" "$DEST"
+# Restore the preserved assets into the fresh install (skips their re-download).
+for a in ffmpeg whisper piper; do
+  if [ -e "$preserve/$a" ]; then rm -rf "$DEST/$a"; mv "$preserve/$a" "$DEST/$a"; fi
+done
 
 # 3. Dependencies
 step "Installing dependencies (this can take a minute)..."
