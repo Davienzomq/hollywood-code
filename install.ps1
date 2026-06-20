@@ -176,6 +176,16 @@ try {
 Write-Step "Creating launchers in $BUN_BIN..."
 New-Item -ItemType Directory -Force -Path $BUN_BIN | Out-Null
 
+# Remove any stale bun-link shims that would SHADOW our .cmd launchers. On
+# Windows PATHEXT resolves .exe before .cmd, so a leftover `bun link` shim
+# (e.g. the old telegram package's hollycode-remote.exe pointing at a deleted
+# entrypoint) would win over the correct .cmd and break the command.
+foreach ($n in @("hollycode", "hollycode-remote", "hollycode-update", "hollycode-uninstall")) {
+    foreach ($ext in @("", ".exe", ".bunx")) {
+        Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $BUN_BIN ($n + $ext))
+    }
+}
+
 $hollycode = @"
 @echo off
 rem Hollycode launcher. Runs from the package dir so bunfig.toml preloads the
