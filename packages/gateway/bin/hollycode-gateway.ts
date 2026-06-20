@@ -17,12 +17,14 @@ const PIDFILE = path.join(os.homedir(), ".config", "hollywood", "gateway.pid")
 // never poll the same bot token (Telegram 409). Mirrors hollycode-remote.
 function killStray() {
   if (process.platform === "win32") {
+    // Match the gateway by command line on EITHER runtime name — the installed
+    // runtime is hollycode.exe (a renamed Bun), but a dev run is bun.exe. Then
+    // taskkill /T tears down the whole tree (gateway -> spawned server -> its
+    // child workers) so no orphans linger and two gateways never share a token.
     const ps =
-      `Get-CimInstance Win32_Process -Filter "Name='bun.exe'" | ` +
+      `Get-CimInstance Win32_Process -Filter "Name='hollycode.exe' OR Name='bun.exe'" | ` +
       `Where-Object { $_.CommandLine -like '*hollycode-gateway*' -and $_.ProcessId -ne ${process.pid} -and $_.ProcessId -ne ${process.ppid} } | ` +
-      `ForEach-Object { ` +
-      `Get-CimInstance Win32_Process -Filter ("ParentProcessId = " + $_.ProcessId) | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; ` +
-      `Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`
+      `ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>$null | Out-Null }`
     spawnSync("powershell.exe", ["-NoProfile", "-Command", ps], { stdio: "ignore", timeout: 15000 })
   } else {
     spawnSync("sh", ["-c", `pkill -f 'hollycode-gateway.*--bridge' 2>/dev/null || true`], { stdio: "ignore" })
