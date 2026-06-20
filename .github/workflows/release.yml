@@ -1,0 +1,75 @@
+name: release
+
+# Hollycode release workflow.
+# Builds the cross-compiled CLI binaries (packages/opencode/script/build.ts) and
+# attaches them to the GitHub Release for the tag. Runs on a pushed `v*` tag, or
+# manually for an existing tag via the "Run workflow" button (workflow_dispatch).
+#
+# Inherited opencode workflows are gated `if: github.repository == 'anomalyco/opencode'`
+# and do NOT run on this fork; this is Hollycode's own, self-contained release path
+# (uses the built-in GITHUB_TOKEN — no external signing/npm/AUR secrets required).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build & attach (e.g. 1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency: release-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Resolve version
+        id: v
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VER="${{ inputs.version }}"
+          else
+            VER="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$VER"
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Install zip
+        run: sudo apt-get update && sudo apt-get install -y zip
+
+      - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${{ steps.v.outputs.version }}"
+          if ! gh release view "v$VER" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "v$VER" --repo "${{ github.repository }}" \
+              --title "Hollycode v$VER" --notes "Hollycode v$VER"
+          fi
+
+      - name: Build CLI binaries + upload to the release
+        env:
+          OPENCODE_VERSION: ${{ steps.v.outputs.version }}
+          OPENCODE_CHANNEL: latest
+          OPENCODE_RELEASE: "1"
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: bun ./packages/opencode/script/build.ts
