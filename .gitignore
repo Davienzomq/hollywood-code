@@ -35,3 +35,9 @@ tsconfig.tsbuildinfo
 
 # Landing page — deployed to Vercel directly; kept private, never tracked here
 landing/
+
+# Internal planning/status docs — kept local only, never published
+UPGRADE2.0.md
+LANDINGPAGE.md
+planoextensao.md
+HOLLYWOOD.md
