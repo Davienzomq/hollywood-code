@@ -23,6 +23,20 @@ if (-not (Test-Path $BUN_EXE)) {
     Write-Ok "Bun already installed."
 }
 
+# 1b. Stop any running Hollycode FIRST. A running gateway/terminal holds
+# hollycode.exe open, and Windows refuses to delete a running .exe — that's the
+# "Access to the path 'hollycode.exe' is denied" error when updating. Stop the
+# gateway gracefully, then force-kill any remaining hollycode runtime processes.
+Write-Step "Stopping any running Hollycode..."
+try {
+    $gw = Join-Path $DEST "packages\gateway\bin\hollycode-gateway.ts"
+    if ((Test-Path $BUN_EXE) -and (Test-Path $gw)) {
+        & $BUN_EXE run $gw --stop 2>$null | Out-Null
+    }
+} catch {}
+Get-Process -Name hollycode -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 600
+
 # 2. Download + extract (replaces any previous install)
 Write-Step "Downloading Hollycode..."
 $tmp = Join-Path $env:TEMP ("hollycode-" + [guid]::NewGuid().ToString("N"))
@@ -31,7 +45,20 @@ try {
     Invoke-WebRequest -Uri $ZIP -OutFile (Join-Path $tmp "repo.zip") -UseBasicParsing
     Write-Step "Extracting to $DEST..."
     Expand-Archive -Path (Join-Path $tmp "repo.zip") -DestinationPath $tmp -Force
-    if (Test-Path $DEST) { Remove-Item -Recurse -Force $DEST }
+    if (Test-Path $DEST) {
+        # Retry the wipe: if a hollycode.exe is still holding a lock, kill it and try again.
+        $removed = $false
+        for ($i = 0; $i -lt 5; $i++) {
+            try { Remove-Item -Recurse -Force $DEST -ErrorAction Stop; $removed = $true; break }
+            catch {
+                Get-Process -Name hollycode -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Milliseconds 800
+            }
+        }
+        if (-not $removed) {
+            throw "Could not replace $DEST — close any running Hollycode (gateway/terminal) and run hollycode-update again."
+        }
+    }
     Move-Item (Join-Path $tmp "hollywood-code-main") $DEST
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

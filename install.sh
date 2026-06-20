@@ -29,6 +29,11 @@ trap 'rm -rf "$tmp"' EXIT
 curl -fsSL "$TARBALL" -o "$tmp/repo.tar.gz"
 step "Extracting to $DEST..."
 tar -xzf "$tmp/repo.tar.gz" -C "$tmp"
+# Stop any running Hollycode first so it isn't using stale code mid-update
+# (best-effort; on Windows a running hollycode.exe would also lock the dir).
+if [ -x "$BUN" ] && [ -f "$DEST/packages/gateway/bin/hollycode-gateway.ts" ]; then
+  "$BUN" run "$DEST/packages/gateway/bin/hollycode-gateway.ts" --stop 2>/dev/null || true
+fi
 rm -rf "$DEST"
 mv "$tmp/hollywood-code-main" "$DEST"
 
