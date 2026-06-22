@@ -21,7 +21,7 @@ async function published(name: string, version: string) {
   return (await $`npm view ${name}@${version} version`.nothrow()).exitCode === 0
 }
 
-async function publish(cwd: string, name: string, version: string) {
+async function publish(cwd: string, name: string, version: string, maxAttempts = 6) {
   // GitHub artifact downloads can drop the executable bit.
   if (process.platform !== "win32") await $`chmod -R 755 .`.cwd(cwd)
   if (await published(name, version)) {
@@ -32,7 +32,7 @@ async function publish(cwd: string, name: string, version: string) {
   // New npm accounts rate-limit publishing many large packages quickly (E429).
   // Retry with backoff, and re-check after each try since a 429 response can
   // still have landed the publish.
-  for (let attempt = 1; attempt <= 6; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const res = await $`npm publish *.tgz --access public --tag ${Script.channel}`.cwd(cwd).nothrow()
     if (res.exitCode === 0) {
       console.log(`published ${name}@${version}`)
@@ -42,11 +42,12 @@ async function publish(cwd: string, name: string, version: string) {
       console.log(`published ${name}@${version} (confirmed after rate-limit)`)
       return
     }
-    const wait = Math.min(90, attempt * 20)
-    console.warn(`publish ${name} failed (attempt ${attempt}/6) — retrying in ${wait}s`)
+    if (attempt === maxAttempts) break
+    const wait = Math.min(60, attempt * 15)
+    console.warn(`publish ${name} failed (attempt ${attempt}/${maxAttempts}) — retrying in ${wait}s`)
     await Bun.sleep(wait * 1000)
   }
-  throw new Error(`failed to publish ${name}@${version} after 6 attempts (npm rate limit?)`)
+  throw new Error(`failed to publish ${name}@${version} after ${maxAttempts} attempts (npm rate limit?)`)
 }
 
 // Per-platform packages produced by build.ts (dist/hollycode-<platform>/package.json).
@@ -107,7 +108,7 @@ const names = Object.keys(binaries)
 const failed: string[] = []
 for (let i = 0; i < names.length; i++) {
   try {
-    await publish(`./dist/${names[i]}`, names[i], binaries[names[i]])
+    await publish(`./dist/${names[i]}`, names[i], binaries[names[i]], 3)
   } catch (e) {
     console.warn(`⚠️ ${names[i]} failed: ${e instanceof Error ? e.message : e}`)
     failed.push(names[i])
