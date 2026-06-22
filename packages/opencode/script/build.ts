@@ -17,6 +17,11 @@ const generated = await import("./generate.ts")
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
 
+// Brand prefix for the released artifacts + the installed binary. Internal
+// package names stay "opencode" (keeps upstream rebases and imports intact);
+// only the distributed file/dir/binary names are rebranded to hollycode.
+const BRAND = "hollycode"
+
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
@@ -144,7 +149,7 @@ if (!skipInstall) {
 }
 for (const item of targets) {
   const name = [
-    pkg.name,
+    BRAND,
     // changing to win32 flags npm for some reason
     item.os === "win32" ? "windows" : item.os,
     item.arch,
@@ -179,8 +184,8 @@ for (const item of targets) {
       autoloadDotenv: false,
       autoloadTsconfig: true,
       autoloadPackageJson: true,
-      target: name.replace(pkg.name, "bun") as any,
-      outfile: `dist/${name}/bin/opencode`,
+      target: name.replace(BRAND, "bun") as any,
+      outfile: `dist/${name}/bin/${BRAND}`,
       execArgv: [`--user-agent=hollycode/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
@@ -200,7 +205,7 @@ for (const item of targets) {
 
   // Smoke test: only run if binary is for current platform
   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
-    const binaryPath = `dist/${name}/bin/opencode`
+    const binaryPath = `dist/${name}/bin/${BRAND}`
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
       const versionOutput = await $`${binaryPath} --version`.text()
