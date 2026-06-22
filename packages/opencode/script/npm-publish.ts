@@ -99,13 +99,30 @@ await Bun.file(`./dist/${MAIN}/package.json`).write(
   ),
 )
 
-// Publish every platform package first, then the main package. Space them out
-// to stay under a new account's publish rate limit.
+// Publish every platform package, spaced out to stay under a new account's
+// publish rate limit. A failure on a NICHE platform (e.g. windows-arm64) must
+// NOT block the main `hollycode` package — that's the one `npm i -g hollycode`
+// needs. So collect platform failures and continue; re-run to fill them in.
 const names = Object.keys(binaries)
+const failed: string[] = []
 for (let i = 0; i < names.length; i++) {
-  await publish(`./dist/${names[i]}`, names[i], binaries[names[i]])
+  try {
+    await publish(`./dist/${names[i]}`, names[i], binaries[names[i]])
+  } catch (e) {
+    console.warn(`⚠️ ${names[i]} failed: ${e instanceof Error ? e.message : e}`)
+    failed.push(names[i])
+  }
   await Bun.sleep(8000)
 }
+
+// Always publish the main package (throws → fails the run only if THIS fails).
 await publish(`./dist/${MAIN}`, MAIN, version)
 
-console.log(`\n✅ published ${MAIN}@${version} + ${Object.keys(binaries).length} platform packages`)
+if (failed.length) {
+  console.warn(
+    `\n⚠️ published ${MAIN}@${version}, but ${failed.length} platform package(s) still pending: ` +
+      `${failed.join(", ")} — re-run the release to publish them.`,
+  )
+} else {
+  console.log(`\n✅ published ${MAIN}@${version} + all ${names.length} platform packages`)
+}
