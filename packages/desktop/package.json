@@ -4,9 +4,9 @@
   "version": "1.17.1",
   "type": "module",
   "license": "MIT",
-  "homepage": "https://opencode.ai",
+  "homepage": "https://hollycode.vercel.app",
   "author": {
-    "name": "OpenCode",
+    "name": "Hollycode",
     "email": "hello@opencode.ai"
   },
   "scripts": {

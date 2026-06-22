@@ -27,7 +27,7 @@ const channel = (() => {
 })()
 
 const getBase = (): Configuration => ({
-  artifactName: "opencode-desktop-${os}-${arch}.${ext}",
+  artifactName: "hollycode-desktop-${os}-${arch}.${ext}",
   directories: {
     output: "dist",
     buildResources: "resources",
@@ -54,8 +54,8 @@ const getBase = (): Configuration => ({
     sign: true,
   },
   protocols: {
-    name: "OpenCode",
-    schemes: ["opencode"],
+    name: "Hollycode",
+    schemes: ["hollycode"],
   },
   win: {
     icon: `resources/icons/icon.ico`,
@@ -74,7 +74,7 @@ const getBase = (): Configuration => ({
   linux: {
     icon: `resources/icons`,
     category: "Development",
-    executableName: "opencode-desktop",
+    executableName: "hollycode-desktop",
     target: ["AppImage", "deb", "rpm"],
   },
 })
@@ -86,29 +86,29 @@ function getConfig() {
     case "dev": {
       return {
         ...base,
-        appId: "ai.opencode.desktop.dev",
-        productName: "OpenCode Dev",
-        rpm: { packageName: "opencode-dev" },
+        appId: "ai.hollycode.desktop.dev",
+        productName: "Hollycode Dev",
+        rpm: { packageName: "hollycode-dev" },
       }
     }
     case "beta": {
       return {
         ...base,
-        appId: "ai.opencode.desktop.beta",
-        productName: "OpenCode Beta",
-        protocols: { name: "OpenCode Beta", schemes: ["opencode"] },
-        publish: { provider: "github", owner: "anomalyco", repo: "opencode-beta", channel: "latest" },
-        rpm: { packageName: "opencode-beta" },
+        appId: "ai.hollycode.desktop.beta",
+        productName: "Hollycode Beta",
+        protocols: { name: "Hollycode Beta", schemes: ["hollycode"] },
+        publish: { provider: "github", owner: "Davienzomq", repo: "hollywood-code", channel: "latest" },
+        rpm: { packageName: "hollycode-beta" },
       }
     }
     case "prod": {
       return {
         ...base,
-        appId: "ai.opencode.desktop",
-        productName: "OpenCode",
-        protocols: { name: "OpenCode", schemes: ["opencode"] },
-        publish: { provider: "github", owner: "anomalyco", repo: "opencode", channel: "latest" },
-        rpm: { packageName: "opencode" },
+        appId: "ai.hollycode.desktop",
+        productName: "Hollycode",
+        protocols: { name: "Hollycode", schemes: ["hollycode"] },
+        publish: { provider: "github", owner: "Davienzomq", repo: "hollywood-code", channel: "latest" },
+        rpm: { packageName: "hollycode" },
       }
     }
   }
