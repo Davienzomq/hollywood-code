@@ -460,6 +460,8 @@
       "version": "0.1.0",
       "bin": {
         "hollycode-gateway": "./bin/hollycode-gateway.ts",
+        "hollycode-datagen": "./bin/hollycode-datagen.ts",
+        "hollycode-image-mcp": "./bin/hollycode-image-mcp.ts",
       },
       "dependencies": {
         "@opencode-ai/sdk": "workspace:*",
@@ -516,7 +518,7 @@
     },
     "packages/opencode": {
       "name": "opencode",
-      "version": "1.17.1",
+      "version": "1.0.1",
       "bin": {
         "opencode": "./bin/opencode",
       },
@@ -937,6 +939,7 @@
   "patchedDependencies": {
     "solid-js@1.9.10": "patches/solid-js@1.9.10.patch",
     "virtua@0.49.1": "patches/virtua@0.49.1.patch",
+    "electron-dl@4.0.0": "patches/electron-dl@4.0.0.patch",
     "gcp-metadata@8.1.2": "patches/gcp-metadata@8.1.2.patch",
     "@ai-sdk/google@3.0.73": "patches/@ai-sdk%2Fgoogle@3.0.73.patch",
     "@ai-sdk/xai@3.0.82": "patches/@ai-sdk%2Fxai@3.0.82.patch",

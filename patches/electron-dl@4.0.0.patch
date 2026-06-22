@@ -1,0 +1,16 @@
+diff --git a/index.js b/index.js
+--- a/index.js
++++ b/index.js
+@@ -1,9 +1,10 @@
+ import process from 'node:process';
+ import path from 'node:path';
+-import {
++import electron from 'electron';
++const {
+ 	app,
+ 	BrowserWindow,
+ 	shell,
+ 	dialog,
+-} from 'electron';
++} = electron;
+ import {unusedFilenameSync} from 'unused-filename';
