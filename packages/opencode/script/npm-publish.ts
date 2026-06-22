@@ -29,8 +29,24 @@ async function publish(cwd: string, name: string, version: string) {
     return
   }
   await $`bun pm pack`.cwd(cwd)
-  await $`npm publish *.tgz --access public --tag ${Script.channel}`.cwd(cwd)
-  console.log(`published ${name}@${version}`)
+  // New npm accounts rate-limit publishing many large packages quickly (E429).
+  // Retry with backoff, and re-check after each try since a 429 response can
+  // still have landed the publish.
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    const res = await $`npm publish *.tgz --access public --tag ${Script.channel}`.cwd(cwd).nothrow()
+    if (res.exitCode === 0) {
+      console.log(`published ${name}@${version}`)
+      return
+    }
+    if (await published(name, version)) {
+      console.log(`published ${name}@${version} (confirmed after rate-limit)`)
+      return
+    }
+    const wait = Math.min(90, attempt * 20)
+    console.warn(`publish ${name} failed (attempt ${attempt}/6) — retrying in ${wait}s`)
+    await Bun.sleep(wait * 1000)
+  }
+  throw new Error(`failed to publish ${name}@${version} after 6 attempts (npm rate limit?)`)
 }
 
 // Per-platform packages produced by build.ts (dist/hollycode-<platform>/package.json).
@@ -83,9 +99,12 @@ await Bun.file(`./dist/${MAIN}/package.json`).write(
   ),
 )
 
-// Publish every platform package first, then the main package.
-for (const name of Object.keys(binaries)) {
-  await publish(`./dist/${name}`, name, binaries[name])
+// Publish every platform package first, then the main package. Space them out
+// to stay under a new account's publish rate limit.
+const names = Object.keys(binaries)
+for (let i = 0; i < names.length; i++) {
+  await publish(`./dist/${names[i]}`, names[i], binaries[names[i]])
+  await Bun.sleep(8000)
 }
 await publish(`./dist/${MAIN}`, MAIN, version)
 
