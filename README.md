@@ -3,6 +3,10 @@
 </p>
 <p align="center">The AI coding agent that casts the right model for every scene.</p>
 <p align="center">
+  <a href="https://hollycode.vercel.app"><b>🌐 hollycode.vercel.app</b></a>
+</p>
+<p align="center">
+  <a href="https://hollycode.vercel.app"><img alt="Website" src="https://img.shields.io/badge/website-hollycode.vercel.app-e0b341?style=flat-square" /></a>
   <a href="https://github.com/Davienzomq/hollywood-code"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green?style=flat-square" /></a>
   <a href="https://github.com/Davienzomq/hollywood-code"><img alt="Built on opencode" src="https://img.shields.io/badge/built%20on-opencode-blue?style=flat-square" /></a>
 </p>
