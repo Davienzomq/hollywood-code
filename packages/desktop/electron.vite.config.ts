@@ -44,6 +44,31 @@ export default defineConfig({
     },
     plugins: [
       {
+        // The bundled ESM main does `import electron, { app, BrowserWindow, ... }
+        // from "electron"`, but Electron exposes no ESM *named* exports for the
+        // built-in "electron" module, so the named import throws "does not provide
+        // an export named 'BrowserWindow'". Rewrite it to a default import +
+        // destructure (works via the CJS-default interop). Pairs with pinning
+        // electron-context-menu to the CJS 3.x chain (electron-dl@3/electron-is-dev@2)
+        // so the externalized helper deps resolve electron via require() too.
+        name: "hollycode:electron-esm-named-import-interop",
+        renderChunk(code: string) {
+          let changed = false
+          let out = code.replace(
+            /import\s+(\w+)\s*,\s*\{([^}]*)\}\s*from\s*["']electron["'];?/g,
+            (_m, def, named) => {
+              changed = true
+              return `import ${def} from "electron"; const {${named}} = ${def};`
+            },
+          )
+          out = out.replace(/import\s*\{([^}]*)\}\s*from\s*["']electron["'];?/g, (_m, named) => {
+            changed = true
+            return `import __electron_default from "electron"; const {${named}} = __electron_default;`
+          })
+          return changed ? { code: out, map: null } : null
+        },
+      },
+      {
         name: "opencode:node-pty-narrower",
         enforce: "pre",
         resolveId(s) {
