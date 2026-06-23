@@ -297,6 +297,10 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     if (text) speak(text)
     else showToast({ title: language.t("toast.model.none.title") })
   }
+  const prefill = (text: string) => {
+    prompt.set([{ type: "text", content: text, start: 0, end: text.length }], text.length)
+    focusInput()
+  }
   const exportSession = async () => {
     const id = params.id
     if (!id) return
@@ -717,6 +721,22 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
       slash: "export",
       disabled: !params.id,
       onSelect: exportSession,
+    }),
+    hollycodeCommand({
+      id: "hollycode.remember",
+      title: "🧠 Remember a fact",
+      description: "Save a durable fact to the project's AGENTS.md (the agent writes it)",
+      slash: "remember",
+      onSelect: () =>
+        prefill("Remember this for the project — append it to AGENTS.md under a '## Memory' section: "),
+    }),
+    hollycodeCommand({
+      id: "hollycode.profile",
+      title: "👤 Show my profile",
+      description: "Ask the agent what it remembers about you",
+      slash: "profile",
+      onSelect: () =>
+        prefill("Read the global ~/.config/opencode/AGENTS.md and show me the '## About the user' section."),
     }),
   ]
 
