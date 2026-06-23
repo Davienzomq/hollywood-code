@@ -48,6 +48,95 @@ import { ServerRowMenu } from "@/components/server/server-row-menu"
 import { ServerHealthIndicator } from "@/components/server/server-row"
 import { type ServerHealth } from "@/utils/server-health"
 
+// ---------------------------------------------------------------------------
+// Hollycode brand constants
+// ---------------------------------------------------------------------------
+const HC_GOLD = "#e0b341"
+const HC_GOLD_LIGHT = "#f3d27e"
+const HC_DARK = "#0c0c0e"
+const HC_QUICK_ACTIONS = [
+  { label: "/auto", hint: "smart model router" },
+  { label: "/recall", hint: "memory search" },
+  { label: "/insights", hint: "session analytics" },
+  { label: "/personality", hint: "adjust AI style" },
+] as const
+
+// ---------------------------------------------------------------------------
+// HollycodeHero — brand mark + wordmark + tagline
+// ---------------------------------------------------------------------------
+function HollycodeHero() {
+  return (
+    <div class="flex flex-col items-center gap-3 py-6 select-none" aria-label="Hollycode">
+      {/* Clapperboard icon */}
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="0 0 32 32"
+        width="48"
+        height="48"
+        aria-hidden="true"
+        style={{ "border-radius": "8px" }}
+      >
+        <rect width="32" height="32" rx="7" fill={HC_DARK} />
+        <rect x="2" y="2" width="28" height="28" rx="6" fill="#1c1c1f" stroke="#38383a" stroke-width="1" />
+        {/* Clapperboard body */}
+        <rect x="6" y="11" width="20" height="14" rx="2" fill={HC_GOLD} />
+        {/* Clapperboard top bar */}
+        <rect x="6" y="8" width="20" height="5" rx="1.5" fill={HC_GOLD_LIGHT} />
+        {/* Stripes */}
+        <rect x="8" y="8" width="3" height="5" fill={HC_DARK} rx="0.5" />
+        <rect x="13" y="8" width="3" height="5" fill={HC_DARK} rx="0.5" />
+        <rect x="18" y="8" width="3" height="5" fill={HC_DARK} rx="0.5" />
+        {/* Film circle */}
+        <circle cx="16" cy="18" r="4" fill={HC_DARK} opacity="0.35" />
+        <circle cx="16" cy="18" r="2" fill={HC_DARK} opacity="0.5" />
+      </svg>
+
+      {/* Wordmark */}
+      <div class="flex flex-col items-center gap-1">
+        <span
+          class="text-[18px] leading-none tracking-[-0.5px] [font-weight:650] text-v2-text-text-base"
+          style={{ "letter-spacing": "-0.5px" }}
+        >
+          Hollycode
+        </span>
+        <span class="text-[11px] leading-none tracking-[0.1px] text-v2-text-text-faint [font-weight:440]">
+          Your frontier model is the star — stop making it do the stunts.
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// HollycodeQuickActions — slash-command hint chips
+// ---------------------------------------------------------------------------
+function HollycodeQuickActions() {
+  return (
+    <div
+      class="flex flex-wrap items-center gap-1.5 px-4 pb-3"
+      aria-label="Hollycode quick actions"
+      title="Type these commands inside any session"
+    >
+      {HC_QUICK_ACTIONS.map((action) => (
+        <div
+          class="group flex items-center gap-1 rounded-[5px] border border-v2-border-border-muted bg-v2-background-bg-deep px-2 py-1 cursor-default"
+          title={action.hint}
+        >
+          <span
+            class="text-[11px] leading-none [font-weight:530]"
+            style={{ color: HC_GOLD }}
+          >
+            {action.label}
+          </span>
+          <span class="text-[10px] leading-none text-v2-text-text-faint [font-weight:440] opacity-0 group-hover:opacity-100 transition-opacity duration-[120ms]">
+            {action.hint}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 const HOME_SESSION_LIMIT = 64
 const HOME_ROW_LAYOUT =
   "flex min-w-0 w-full shrink-0 cursor-default items-center rounded-[6px] bg-transparent text-left transition-[background-color,color,box-shadow] duration-[120ms] ease-in-out focus-visible:outline-none"
@@ -368,6 +457,8 @@ function HomeDesign() {
           class="min-h-0 min-w-0 flex-1 flex flex-col pt-12"
           aria-label={language.t("sidebar.project.recentSessions")}
         >
+          <HollycodeHero />
+          <HollycodeQuickActions />
           <HomeSessionSearch
             value={state.search}
             placeholder={language.t("home.sessions.search.placeholder")}
@@ -1148,6 +1239,7 @@ function LegacyHome() {
 
   return (
     <div class="mx-auto mt-55 w-full md:w-auto px-4">
+      <HollycodeHero />
       <Logo class="md:w-xl opacity-12" />
       <Button
         size="large"

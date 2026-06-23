@@ -1928,6 +1928,15 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                                       style={{ "will-change": "opacity", transform: "translateZ(0)" }}
                                     />
                                   </Show>
+                                  <Show when={local.model.auto() !== "off"}>
+                                    <span
+                                      class="shrink-0 text-11-medium"
+                                      style={{ color: "#e0b341" }}
+                                      title={local.model.auto() === "mix" ? "Mix router on" : "Auto-router on"}
+                                    >
+                                      {local.model.auto() === "mix" ? "🎭 Mix" : "🎬 Auto"}
+                                    </span>
+                                  </Show>
                                   <span class="truncate">
                                     {local.model.current()?.name ?? language.t("dialog.model.select.title")}
                                   </span>
@@ -1960,6 +1969,15 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                                     class="size-4 shrink-0 opacity-40 group-hover:opacity-100 transition-opacity duration-150"
                                     style={{ "will-change": "opacity", transform: "translateZ(0)" }}
                                   />
+                                </Show>
+                                <Show when={local.model.auto() !== "off"}>
+                                  <span
+                                    class="shrink-0 text-11-medium"
+                                    style={{ color: "#e0b341" }}
+                                    title={local.model.auto() === "mix" ? "Mix router on" : "Auto-router on"}
+                                  >
+                                    {local.model.auto() === "mix" ? "🎭 Mix" : "🎬 Auto"}
+                                  </span>
                                 </Show>
                                 <span class="truncate">
                                   {local.model.current()?.name ?? language.t("dialog.model.select.title")}
