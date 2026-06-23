@@ -14,6 +14,7 @@ import { useSettings } from "@/context/settings"
 import { useSync } from "@/context/sync"
 import { useTerminal } from "@/context/terminal"
 import { showToast } from "@/utils/toast"
+import { speak } from "@/utils/voice"
 import { findLast } from "@opencode-ai/core/util/array"
 import { createSessionTabs } from "@/pages/session/helpers"
 import { extractPromptFromParts } from "@/utils/prompt"
@@ -122,6 +123,7 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
   const mcpCommand = withCategory(language.t("command.category.mcp"))
   const agentCommand = withCategory(language.t("command.category.agent"))
   const permissionsCommand = withCategory(language.t("command.category.permissions"))
+  const hollycodeCommand = withCategory("Hollycode")
 
   const isAutoAcceptActive = () => {
     const sessionID = params.id
@@ -262,6 +264,37 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     void import("@/components/dialog-select-mcp").then((x) => {
       dialog.show(() => <x.DialogSelectMcp />)
     })
+  }
+
+  const openInsights = () => {
+    void import("@/components/dialog-insights").then((x) => {
+      dialog.show(() => <x.DialogInsights />)
+    })
+  }
+  const openSkills = () => {
+    void import("@/components/dialog-skills").then((x) => {
+      dialog.show(() => <x.DialogSkills />)
+    })
+  }
+  const openRecall = () => {
+    void import("@/components/dialog-recall").then((x) => {
+      dialog.show(() => <x.DialogRecall />)
+    })
+  }
+  const speakLast = () => {
+    const id = params.id
+    if (!id) return
+    const msgs = sync.data.message[id] ?? []
+    const last = [...msgs].reverse().find((m) => m.role === "assistant")
+    if (!last) return
+    const parts = sync.data.part[last.id] ?? []
+    const text = parts
+      .filter((p) => p.type === "text")
+      .map((p) => (p as { text?: string }).text ?? "")
+      .join(" ")
+      .trim()
+    if (text) speak(text)
+    else showToast({ title: language.t("toast.model.none.title") })
   }
 
   const toggleAutoAccept = () => {
@@ -598,6 +631,39 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     }),
   ]
 
+  const hollycodeCmds = () => [
+    hollycodeCommand({
+      id: "hollycode.recall",
+      title: "🔎 Recall — search past sessions",
+      description: "Search your past sessions by keyword",
+      slash: "recall",
+      onSelect: openRecall,
+    }),
+    hollycodeCommand({
+      id: "hollycode.insights",
+      title: "🎬 Insights — cost & stunt-double savings",
+      description: "Per-model cost breakdown and savings vs the priciest model",
+      slash: "insights",
+      disabled: !params.id,
+      onSelect: openInsights,
+    }),
+    hollycodeCommand({
+      id: "hollycode.skills",
+      title: "Skills — browse available skills",
+      description: "List the skills available to the agent",
+      slash: "skills",
+      onSelect: openSkills,
+    }),
+    hollycodeCommand({
+      id: "hollycode.speak",
+      title: "🔊 Read last reply aloud",
+      description: "Speak the agent's last reply using the browser voice",
+      slash: "speak",
+      disabled: !params.id,
+      onSelect: speakLast,
+    }),
+  ]
+
   command.register("session", () => [
     ...sessionCmds(),
     ...shareCmds(),
@@ -610,5 +676,6 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     ...mcpCmds(),
     ...agentCmds(),
     ...permissionsCmds(),
+    ...hollycodeCmds(),
   ])
 }
