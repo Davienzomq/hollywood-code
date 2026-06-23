@@ -54,6 +54,13 @@ export function NewSessionView(props: NewSessionViewProps) {
         <div class="w-full max-w-200 flex flex-col items-center text-center gap-4">
           <div class="flex flex-col items-center gap-6">
             <Mark class="w-10" />
+            <div
+              data-component="hollycode-wordmark"
+              style={{ "font-size": "30px", "font-weight": "600", "letter-spacing": "-0.01em", "line-height": "1" }}
+            >
+              <span style={{ color: "#e0b341" }}>HOLLY</span>
+              <span class="text-text-strong">CODE</span>
+            </div>
             <div class="text-20-medium text-text-strong">{language.t("session.new.title")}</div>
           </div>
           <div class="w-full flex flex-col gap-4 items-center">
