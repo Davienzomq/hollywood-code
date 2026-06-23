@@ -26,6 +26,8 @@ type Saved = {
   // Hollycode stuntdouble router mode (global for this workspace), persisted so
   // the choice survives reloads. "off" = manual model selection (default).
   auto?: AutoMode
+  // Hollycode personality flavor prepended to sent prompts. "default" = none.
+  personality?: string
 }
 
 const WORKSPACE_KEY = "__workspace__"
@@ -40,9 +42,11 @@ const migrate = (value: unknown) => {
     session?: Record<string, State | undefined>
     pick?: Record<string, State | undefined>
     auto?: AutoMode
+    personality?: string
   }
 
-  if (item.session && typeof item.session === "object") return { session: item.session, auto: item.auto }
+  if (item.session && typeof item.session === "object")
+    return { session: item.session, auto: item.auto, personality: item.personality }
   if (!item.pick || typeof item.pick !== "object") return { session: {} }
 
   return {
@@ -377,6 +381,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       slug: createMemo(() => base64Encode(sdk.directory)),
       model,
       agent,
+      // Hollycode personality flavor (default | concise | mentor | pirate | pair).
+      personality: () => saved.personality ?? "default",
+      setPersonality(name: string) {
+        setSaved("personality", name)
+      },
       session: {
         reset() {
           setStore("draft", undefined)

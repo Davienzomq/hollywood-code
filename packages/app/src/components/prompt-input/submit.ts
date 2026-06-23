@@ -19,6 +19,7 @@ import { Identifier } from "@/utils/id"
 import { Worktree as WorktreeState } from "@/utils/worktree"
 import { buildRequestParts } from "./build-request-parts"
 import { castModel } from "@/utils/auto-router"
+import { personalityPrefix } from "@/utils/personalities"
 import { useProviders } from "@/hooks/use-providers"
 import { setCursorPosition } from "./editor-dom"
 import { formatServerError } from "@/utils/server-errors"
@@ -39,6 +40,7 @@ export type FollowupDraft = {
   agent: string
   model: { providerID: string; modelID: string }
   variant?: string
+  systemPrefix?: string
 }
 
 type FollowupSendInput = {
@@ -117,6 +119,7 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
     sessionID: input.draft.sessionID,
     messageID,
     sessionDirectory: input.draft.sessionDirectory,
+    systemPrefix: input.draft.systemPrefix,
   })
 
   const message: Message = {
@@ -443,6 +446,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       agent,
       model,
       variant,
+      systemPrefix: personalityPrefix(local.personality()),
     }
 
     const clearInput = () => {

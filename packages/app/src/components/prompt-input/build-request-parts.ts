@@ -27,6 +27,9 @@ type BuildRequestPartsInput = {
   messageID: string
   sessionID: string
   sessionDirectory: string
+  // Hollycode personality flavor: prepended to the SENT prompt as a synthetic
+  // leading text part, but excluded from the visible (optimistic) timeline.
+  systemPrefix?: string
 }
 
 const absolute = (directory: string, path: string) => {
@@ -89,7 +92,11 @@ const toOptimisticPart = (part: PromptRequestPart, sessionID: string, messageID:
 }
 
 export function buildRequestParts(input: BuildRequestPartsInput) {
+  const systemPart: PromptRequestPart | undefined = input.systemPrefix
+    ? { id: Identifier.ascending("part"), type: "text", text: input.systemPrefix, synthetic: true }
+    : undefined
   const requestParts: PromptRequestPart[] = [
+    ...(systemPart ? [systemPart] : []),
     {
       id: Identifier.ascending("part"),
       type: "text",
@@ -196,6 +203,10 @@ export function buildRequestParts(input: BuildRequestPartsInput) {
 
   return {
     requestParts,
-    optimisticParts: requestParts.map((part) => toOptimisticPart(part, input.sessionID, input.messageID)),
+    // The personality system prefix is sent to the agent but hidden from the
+    // visible (optimistic) timeline.
+    optimisticParts: requestParts
+      .filter((part) => part !== systemPart)
+      .map((part) => toOptimisticPart(part, input.sessionID, input.messageID)),
   }
 }

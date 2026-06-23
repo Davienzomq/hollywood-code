@@ -15,6 +15,7 @@ import { useSync } from "@/context/sync"
 import { useTerminal } from "@/context/terminal"
 import { showToast } from "@/utils/toast"
 import { speak } from "@/utils/voice"
+import { PERSONALITIES, PERSONALITY_ORDER, isPersonality } from "@/utils/personalities"
 import { findLast } from "@opencode-ai/core/util/array"
 import { createSessionTabs } from "@/pages/session/helpers"
 import { extractPromptFromParts } from "@/utils/prompt"
@@ -295,6 +296,46 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
       .trim()
     if (text) speak(text)
     else showToast({ title: language.t("toast.model.none.title") })
+  }
+  const exportSession = async () => {
+    const id = params.id
+    if (!id) return
+    const msgs = sync.data.message[id] ?? []
+    const blocks: string[] = []
+    for (const m of msgs) {
+      const parts = sync.data.part[m.id] ?? []
+      const text = parts
+        .filter((p) => p.type === "text")
+        .map((p) => (p as { text?: string }).text ?? "")
+        .join("\n")
+        .trim()
+      if (!text) continue
+      blocks.push(`### ${m.role === "user" ? "User" : "Assistant"}\n\n${text}\n`)
+    }
+    const md = blocks.join("\n")
+    if (!md) {
+      showToast({ title: language.t("toast.model.none.title") })
+      return
+    }
+    const ok = await write(md)
+    showToast({
+      title: ok ? "📋 Session copied as markdown" : language.t("toast.session.share.copyFailed.title"),
+      variant: ok ? "success" : "error",
+    })
+  }
+  const personalityLabel = () => {
+    const p = local.personality()
+    return PERSONALITIES[isPersonality(p) ? p : "default"].label
+  }
+  const cyclePersonality = () => {
+    const p = local.personality()
+    const cur = isPersonality(p) ? p : "default"
+    const next = PERSONALITY_ORDER[(PERSONALITY_ORDER.indexOf(cur) + 1) % PERSONALITY_ORDER.length]
+    local.setPersonality(next)
+    showToast({
+      title: `🎭 Personality: ${PERSONALITIES[next].label}`,
+      description: next === "default" ? "Default style" : PERSONALITIES[next].instruction,
+    })
   }
 
   const toggleAutoAccept = () => {
@@ -661,6 +702,21 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
       slash: "speak",
       disabled: !params.id,
       onSelect: speakLast,
+    }),
+    hollycodeCommand({
+      id: "hollycode.personality",
+      title: `🎭 Personality: ${personalityLabel()}`,
+      description: "Cycle the agent's personality (default → concise → mentor → pirate → pair)",
+      slash: "personality",
+      onSelect: cyclePersonality,
+    }),
+    hollycodeCommand({
+      id: "hollycode.export",
+      title: "📋 Export session (copy markdown)",
+      description: "Copy the full session transcript to the clipboard as markdown",
+      slash: "export",
+      disabled: !params.id,
+      onSelect: exportSession,
     }),
   ]
 
