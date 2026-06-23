@@ -11,6 +11,7 @@ import { useSDK } from "./sdk"
 import { useSync } from "./sync"
 import { useServerSDK } from "./server-sdk"
 import { ScopedKey, type ServerScope } from "@/utils/server-scope"
+import type { AutoMode } from "@/utils/auto-router"
 
 export type ModelKey = { providerID: string; modelID: string; variant?: string }
 
@@ -22,6 +23,9 @@ type State = {
 
 type Saved = {
   session: Record<string, State | undefined>
+  // Hollycode stuntdouble router mode (global for this workspace), persisted so
+  // the choice survives reloads. "off" = manual model selection (default).
+  auto?: AutoMode
 }
 
 const WORKSPACE_KEY = "__workspace__"
@@ -35,9 +39,10 @@ const migrate = (value: unknown) => {
   const item = value as {
     session?: Record<string, State | undefined>
     pick?: Record<string, State | undefined>
+    auto?: AutoMode
   }
 
-  if (item.session && typeof item.session === "object") return { session: item.session }
+  if (item.session && typeof item.session === "object") return { session: item.session, auto: item.auto }
   if (!item.pick || typeof item.pick !== "object") return { session: {} }
 
   return {
@@ -276,6 +281,12 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       current,
       recent,
       list: models.list,
+      // Hollycode stuntdouble router: "off" | "auto" (cast within the active
+      // provider) | "mix" (cast across providers). Persisted per workspace.
+      auto: () => (saved.auto ?? "off") as AutoMode,
+      setAuto(mode: AutoMode) {
+        setSaved("auto", mode)
+      },
       cycle(direction: 1 | -1) {
         const items = recent()
         const item = current()

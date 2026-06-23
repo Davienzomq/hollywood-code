@@ -527,6 +527,32 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
       keybind: "shift+mod+d",
       onSelect: () => local.model.variant.cycle(),
     }),
+    modelCommand({
+      id: "model.auto",
+      title:
+        local.model.auto() === "off"
+          ? "🎬 Auto-router: Off (manual)"
+          : local.model.auto() === "auto"
+            ? "🎬 Auto-router: On — per-provider"
+            : "🎭 Mix-router: On — cross-provider",
+      description: "Stuntdouble: score each message and cast the model automatically (off → auto → mix)",
+      slash: "auto",
+      onSelect: () => {
+        const cur = local.model.auto()
+        const next = cur === "off" ? "auto" : cur === "auto" ? "mix" : "off"
+        local.model.setAuto(next)
+        showToast({
+          title:
+            next === "off"
+              ? "🎬 Auto-router OFF — manual model"
+              : next === "auto"
+                ? "🎬 Auto-router ON — casts within the active provider"
+                : "🎭 Mix-router ON — casts across providers",
+          description:
+            next === "off" ? undefined : "Every message is scored; the cheapest capable model is chosen automatically.",
+        })
+      },
+    }),
   ]
 
   const mcpCmds = () => [

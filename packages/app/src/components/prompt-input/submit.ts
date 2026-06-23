@@ -18,6 +18,8 @@ import { useSync } from "@/context/sync"
 import { Identifier } from "@/utils/id"
 import { Worktree as WorktreeState } from "@/utils/worktree"
 import { buildRequestParts } from "./build-request-parts"
+import { castModel } from "@/utils/auto-router"
+import { useProviders } from "@/hooks/use-providers"
 import { setCursorPosition } from "./editor-dom"
 import { formatServerError } from "@/utils/server-errors"
 import { ScopedKey } from "@/utils/server-scope"
@@ -210,6 +212,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
   const sync = useSync()
   const serverSync = useServerSync()
   const local = useLocal()
+  const providers = useProviders()
   const permission = usePermission()
   const prompt = usePrompt()
   const layout = useLayout()
@@ -309,7 +312,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
 
     const currentModel = local.model.current()
     const currentAgent = local.agent.current()
-    const variant = local.model.variant.current()
+    let variant = local.model.variant.current()
     if (!currentModel || !currentAgent) {
       showToast({
         title: language.t("prompt.toast.modelAgentRequired.title"),
@@ -404,9 +407,31 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       return
     }
 
-    const model = {
+    let model = {
       modelID: currentModel.id,
       providerID: currentModel.provider.id,
+    }
+    // Hollycode stuntdouble auto-router: when on, score this message and recast the
+    // model ("auto" stays within the active provider, "mix" goes cross-provider)
+    // before sending. Plain prompts only — shell + slash commands keep the manual
+    // model.
+    const autoMode = local.model.auto()
+    if (autoMode !== "off" && mode === "normal" && text.trim().length > 0 && !text.startsWith("/")) {
+      const cast = castModel(text, autoMode, {
+        activeProviderID: currentModel.provider.id,
+        providers: providers
+          .connected()
+          .map((p) => ({ id: p.id, models: (p.models ?? {}) as Record<string, { variants?: Record<string, unknown> }> })),
+        fallback: { providerID: currentModel.provider.id, modelID: currentModel.id },
+      })
+      if (cast) {
+        model = { modelID: cast.modelID, providerID: cast.providerID }
+        variant = cast.variant ?? variant
+        showToast({
+          title: `🎬 ${autoMode === "mix" ? "Mix" : "Auto"} cast: ${cast.modelID}`,
+          description: `${cast.tier} scene · score ${cast.score.toFixed(2)}`,
+        })
+      }
     }
     const agent = currentAgent.name
     const context = prompt.context.items().slice()
