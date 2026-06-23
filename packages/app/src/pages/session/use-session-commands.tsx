@@ -14,7 +14,7 @@ import { useSettings } from "@/context/settings"
 import { useSync } from "@/context/sync"
 import { useTerminal } from "@/context/terminal"
 import { showToast } from "@/utils/toast"
-import { speak } from "@/utils/voice"
+import { speak, createListener, speechAvailable } from "@/utils/voice"
 import { PERSONALITIES, PERSONALITY_ORDER, isPersonality } from "@/utils/personalities"
 import { findLast } from "@opencode-ai/core/util/array"
 import { createSessionTabs } from "@/pages/session/helpers"
@@ -300,6 +300,26 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
   const prefill = (text: string) => {
     prompt.set([{ type: "text", content: text, start: 0, end: text.length }], text.length)
     focusInput()
+  }
+  let voiceListener: ReturnType<typeof createListener> | undefined
+  const toggleDictation = () => {
+    if (voiceListener?.listening) {
+      voiceListener.stop()
+      showToast({ title: "🎙️ Dictation stopped" })
+      return
+    }
+    if (!speechAvailable().stt) {
+      showToast({ title: "Voice input not available in this environment", variant: "error" })
+      return
+    }
+    voiceListener = createListener({ interim: false })
+    showToast({ title: "🎙️ Listening… speak now (run again to stop)" })
+    voiceListener.start(
+      (text, isFinal) => {
+        if (isFinal && text.trim()) prefill(text.trim())
+      },
+      () => {},
+    )
   }
   const exportSession = async () => {
     const id = params.id
@@ -706,6 +726,13 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
       slash: "speak",
       disabled: !params.id,
       onSelect: speakLast,
+    }),
+    hollycodeCommand({
+      id: "hollycode.listen",
+      title: "🎙️ Dictate (voice → prompt)",
+      description: "Speak and transcribe your message into the composer (run again to stop)",
+      slash: "listen",
+      onSelect: toggleDictation,
     }),
     hollycodeCommand({
       id: "hollycode.personality",
