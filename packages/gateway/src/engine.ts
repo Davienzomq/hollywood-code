@@ -363,6 +363,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
   let personality = config.personality && PERSONALITIES[config.personality] !== undefined ? config.personality : "default"
 
   let eventAbort = new AbortController()
+  // sessionID → last time the model produced ANY output. Lets promptWithFallback
+  // tell "slow but working" (streaming reasoning/text/tools) apart from "truly
+  // stalled" (a quota/credit error the SDK retries with no output), so it only
+  // falls back on a real stall — never on a long-running task.
+  const lastActivity = new Map<string, number>()
   const startEvents = () => {
     eventAbort.abort()
     eventAbort = new AbortController()
@@ -373,6 +378,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
       const compactEnded = new Set<string>()
       for await (const event of events.stream) {
         if (sig.aborted) break
+
+        // Any message event for a session = its model is alive and producing
+        // output. Stamp it so the stall watcher won't abort a working long task.
+        const evSid =
+          (event.properties as any)?.info?.sessionID ?? (event.properties as any)?.part?.sessionID
+        if (evSid) lastActivity.set(evSid, Date.now())
 
         // Auto-compaction notice. The engine compacts automatically when the
         // context crosses the configured threshold (default 95%, like Claude
@@ -1081,21 +1092,31 @@ export async function createEngine(config: GatewayConfig): Promise<{
       }
     }
 
-    // A pinned (likely paid) model with no credits/quota doesn't fail fast — the
-    // SDK retries the quota error, which would freeze the bot. Race it against a
-    // timeout; if it stalls, abort the server-side run and fall back.
-    const PINNED_TIMEOUT_MS = 30_000
+    // A pinned model with no credits/quota doesn't fail fast — the SDK retries
+    // the error with NO output, which would freeze the bot. But a slow model that
+    // IS working streams output the whole time. So abort only on INACTIVITY: if
+    // the model produces no output for STALL_MS, it's truly stuck → fall back. A
+    // long task that keeps streaming is never aborted. (HARD_CEIL is a last resort.)
+    const STALL_MS = 60_000
+    const HARD_CEIL_MS = 15 * 60_000
     const runFirst = async () => {
       if (!isPinnedPaid) return run(model)
+      const started = Date.now()
+      lastActivity.set(sessionId, started) // reset so an old stamp can't insta-abort
       const TIMEOUT = Symbol("timeout")
-      const raced = await Promise.race([
-        run(model),
-        new Promise<typeof TIMEOUT>((res) => setTimeout(() => res(TIMEOUT), PINNED_TIMEOUT_MS)),
-      ])
+      let timer: ReturnType<typeof setInterval> | undefined
+      const stallWatch = new Promise<typeof TIMEOUT>((res) => {
+        timer = setInterval(() => {
+          const idle = Date.now() - (lastActivity.get(sessionId) ?? started)
+          if (idle > STALL_MS || Date.now() - started > HARD_CEIL_MS) res(TIMEOUT)
+        }, 5000)
+      })
+      const raced = await Promise.race([run(model), stallWatch])
+      if (timer) clearInterval(timer)
       if (raced === TIMEOUT) {
-        log("engine", `model ${mkey(model!)} stalled >${PINNED_TIMEOUT_MS}ms — aborting & falling back`)
+        log("engine", `model ${mkey(model!)} produced no output for >${STALL_MS / 1000}s — aborting & falling back`)
         await opencode.client.session.abort({ path: { id: sessionId } }).catch(() => {})
-        return { error: new Error("model timed out"), data: undefined }
+        return { error: new Error("model stalled (no output)"), data: undefined }
       }
       return raced
     }
@@ -1334,10 +1355,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
     if (reply) {
       await statusHandle.finalize(modelLabel).catch(() => {})
       if (fellBackTo) {
+        const pin = pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "your model"
         await responder
           .sendText(
-            `⚠️ Your selected model failed (likely out of credits or rate-limited) — ` +
-              `I answered with the free ${fellBackTo} instead.\nPin another anytime with /model.`,
+            `⚠️ ${pin} went quiet (no output for a while — usually out of quota/credits or rate-limited), so I ` +
+              `answered with the free ${fellBackTo}. Long tasks that keep streaming are no longer cut off, so if it ` +
+              `has credits just resend. Switch anytime with /model.`,
           )
           .catch(() => {})
       }
