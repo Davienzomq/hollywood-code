@@ -1771,6 +1771,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
       }
 
       // --- sessions picker ---
+      case "session":
       case "sessions":
       case "s": {
         if (args) {
@@ -1784,23 +1785,30 @@ export async function createEngine(config: GatewayConfig): Promise<{
         const list = await opencode.client.session.list({}).catch(() => null)
         if (!list?.data) { await responder.sendText("No sessions found."); break }
         const all: any[] = list.data as any[]
-        const options = all.slice(0, 20).map((s: any) =>
-          `${s.id === sid ? "👉 " : ""}${s.title || "untitled"} (${s.id.slice(0, 8)})`,
+        const top = all.slice(0, 20)
+        // Number each option so we can map the choice back to the EXACT session.
+        // (The old code parsed an 8-hex-char id from the label, but opencode ids
+        // are "ses_..." so that regex never matched — picking a session silently
+        // did nothing, the conversation never switched, and context "didn't load".)
+        const options = top.map(
+          (s: any, i: number) => `${i + 1}. ${s.id === sid ? "👉 " : ""}${(s.title || "untitled").slice(0, 48)}`,
         )
         if (!options.length) { await responder.sendText("No sessions found."); break }
         const chosen = await responder.askQuestion({ question: "📋 Sessions — choose to switch:", options })
-        // find id from chosen label (matches the "(8-char-id)" suffix)
-        const match = chosen.match(/\(([a-f0-9-]{8})\)$/)
-        if (match) {
-          const partial = match[1]!
-          const target = (all as any[]).find((s: any) => s.id.startsWith(partial))
-          if (target) {
-            const key = sessionKey(channelId, conversationId)
-            sessionMap.delete(key)
-            sessionMap.set(key, target.id)
-            saveStore()
-            await responder.sendText(`✅ Switched to: ${target.title || target.id}`)
-          }
+        const idxM = chosen.match(/^(\d+)\./)
+        const target = idxM
+          ? top[parseInt(idxM[1]!, 10) - 1]
+          : top.find((s: any) => chosen.includes((s.title || "untitled").slice(0, 48)))
+        if (target) {
+          const key = sessionKey(channelId, conversationId)
+          sessionMap.delete(key)
+          sessionMap.set(key, target.id)
+          saveStore()
+          await responder.sendText(
+            `✅ Switched to: ${target.title || target.id}\nSend a message — I'll continue with this session's full history.`,
+          )
+        } else {
+          await responder.sendText("Couldn't match that choice. Try `/sessions <full-id>`.")
         }
         break
       }
