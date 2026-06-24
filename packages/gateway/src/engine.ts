@@ -993,12 +993,62 @@ export async function createEngine(config: GatewayConfig): Promise<{
     // turn never pointlessly re-runs.
     return !replyTextOf(r)
   }
+  // Pull the provider error text out of a failed result (request error OR a
+  // retry/error part the server attached to the turn).
+  const errorTextOf = (r: any): string => {
+    const parts: any[] = (r?.data?.parts ?? []) as any[]
+    const fromParts = parts
+      .filter((p) => p?.type === "retry" || p?.type === "error")
+      .map((p) => p?.error?.data?.message || p?.error?.message || (typeof p?.error === "string" ? p.error : ""))
+      .join(" ")
+    const fromErr =
+      r?.error?.data?.message || r?.error?.message || (typeof r?.error === "string" ? r.error : "")
+    return `${fromErr} ${fromParts}`.trim()
+  }
+  // Hard provider limits that a retry won't fix (out of quota/credits, plan caps,
+  // rate limits, bad auth). Used to message the user precisely.
+  const isHardLimit = (text: string): boolean =>
+    /usage limit|quota|insufficient|exceeded|rate.?limit|too many requests|\b401\b|\b403\b|\b429\b|unauthor|invalid api key|no credit|out of credit|billing/i.test(
+      text || "",
+    )
+  // A pinned model that keeps failing (quota/credits/rate-limit/timeout) must not
+  // cost 45s on EVERY message. After 2 consecutive failures, mark it "dead" for a
+  // cooldown: skip it and fall back immediately. Reset on any success.
+  const modelFails = new Map<string, number>()
+  const modelDeadUntil = new Map<string, number>()
+  const DEAD_COOLDOWN_MS = 5 * 60_000
+  const mkey = (m: { providerID: string; modelID: string }) => `${m.providerID}/${m.modelID}`
+  const noteModelSuccess = (m?: { providerID: string; modelID: string }) => {
+    if (!m) return
+    modelFails.delete(mkey(m))
+    modelDeadUntil.delete(mkey(m))
+  }
+  const noteModelFailure = (m?: { providerID: string; modelID: string }) => {
+    if (!m) return
+    const k = mkey(m)
+    const n = (modelFails.get(k) ?? 0) + 1
+    modelFails.set(k, n)
+    if (n >= 2) modelDeadUntil.set(k, Date.now() + DEAD_COOLDOWN_MS)
+  }
+  const isModelDead = (m?: { providerID: string; modelID: string }) =>
+    !!m && (modelDeadUntil.get(mkey(m)) ?? 0) > Date.now()
+  // Turn a raw provider error into a clear, actionable message for the user.
+  const hardErrorNotice = (model: string, err: string): string => {
+    const low = (err || "").toLowerCase()
+    if (/usage limit|plan|quota/.test(low))
+      return `⚠️ *${model}* hit its usage limit (ChatGPT Plus caps the top models like gpt-5.5). Switch with /model — e.g. \`gpt-5.4-mini\` — or wait for the limit to reset.`
+    if (/rate.?limit|too many|429/.test(low))
+      return `⚠️ *${model}* is rate-limited right now. Try again shortly, or switch with /model.`
+    if (/401|403|unauthor|api key|invalid|credit|billing|insufficient/.test(low))
+      return `⚠️ *${model}*: auth or credits problem. Re-connect the provider or add credits, or switch with /model.`
+    return `⚠️ *${model}* failed: ${(err || "unknown error").slice(0, 160)}\nSwitch with /model or start fresh with /new.`
+  }
   const promptWithFallback = async (
     sessionId: string,
     parts: any[],
     model: { providerID: string; modelID: string } | undefined,
     variantOverride?: string,
-  ): Promise<{ result: any; fellBackTo?: string }> => {
+  ): Promise<{ result: any; fellBackTo?: string; hardError?: string; skippedDead?: boolean }> => {
     const run = (m?: { providerID: string; modelID: string }) => {
       const body: any = { parts, agent: agentForMode(sessionId) }
       if (m) body.model = m
@@ -1015,10 +1065,22 @@ export async function createEngine(config: GatewayConfig): Promise<{
     const isPinnedPaid =
       !!model && (!fb || model.providerID !== fb.providerID || model.modelID !== fb.modelID)
 
-    // A pinned (likely paid) model with no credits doesn't fail fast — the SDK
-    // retries the quota error for minutes, which would freeze the bot. Race it
-    // against a timeout; if it stalls, abort the server-side run and fall back.
-    const PINNED_TIMEOUT_MS = 45_000
+    // The pinned model failed repeatedly very recently (quota/credits/rate-limit/
+    // timeout) → don't burn the timeout on it again. Go straight to the free
+    // fallback and tell the caller we skipped a dead model.
+    if (model && isPinnedPaid && isModelDead(model)) {
+      log("engine", `skipping recently-dead ${mkey(model)} — falling back directly`)
+      if (fb) {
+        const retry = await run(fb)
+        if (!promptFailed(retry)) return { result: retry, fellBackTo: `${fb.providerID}/${fb.modelID}`, skippedDead: true }
+        return { result: retry, skippedDead: true, hardError: errorTextOf(retry) || undefined }
+      }
+    }
+
+    // A pinned (likely paid) model with no credits/quota doesn't fail fast — the
+    // SDK retries the quota error, which would freeze the bot. Race it against a
+    // timeout; if it stalls, abort the server-side run and fall back.
+    const PINNED_TIMEOUT_MS = 30_000
     const runFirst = async () => {
       if (!isPinnedPaid) return run(model)
       const TIMEOUT = Symbol("timeout")
@@ -1027,7 +1089,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
         new Promise<typeof TIMEOUT>((res) => setTimeout(() => res(TIMEOUT), PINNED_TIMEOUT_MS)),
       ])
       if (raced === TIMEOUT) {
-        log("engine", `model ${model!.providerID}/${model!.modelID} stalled >${PINNED_TIMEOUT_MS}ms — aborting & falling back`)
+        log("engine", `model ${mkey(model!)} stalled >${PINNED_TIMEOUT_MS}ms — aborting & falling back`)
         await opencode.client.session.abort({ path: { id: sessionId } }).catch(() => {})
         return { error: new Error("model timed out"), data: undefined }
       }
@@ -1035,12 +1097,20 @@ export async function createEngine(config: GatewayConfig): Promise<{
     }
 
     const result = await runFirst()
-    if (!promptFailed(result)) return { result }
-    if (!fb || !isPinnedPaid) return { result } // already on the free model (or none) — nothing better to try
-    log("engine", `prompt failed on ${model?.providerID}/${model?.modelID} — falling back to ${fb.providerID}/${fb.modelID}`)
+    if (!promptFailed(result)) {
+      noteModelSuccess(model)
+      return { result }
+    }
+    noteModelFailure(model) // 2 strikes → marked dead for a cooldown (skipped above)
+    const pinnedErr = errorTextOf(result)
+    if (!fb || !isPinnedPaid) return { result, hardError: isHardLimit(pinnedErr) ? pinnedErr : undefined }
+    log("engine", `prompt failed on ${model ? mkey(model) : "?"} — falling back to ${fb.providerID}/${fb.modelID}`)
     const retry = await run(fb)
     if (!promptFailed(retry)) return { result: retry, fellBackTo: `${fb.providerID}/${fb.modelID}` }
-    return { result } // both failed → surface the original failure
+    // Both failed → surface the most informative hard error so the user knows why.
+    const fbErr = errorTextOf(retry)
+    const hard = isHardLimit(pinnedErr) ? pinnedErr : isHardLimit(fbErr) ? fbErr : pinnedErr || fbErr
+    return { result, hardError: hard || undefined }
   }
 
   // Whether a model can SEE images (vision). Read from config.providers()
@@ -1219,7 +1289,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
     log("engine", `handleMessage: "${msg.text.slice(0, 40)}" model=${pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "auto"} images=${msg.images?.length ?? 0} → prompting...`)
 
     const poller = setInterval(() => { void resolvePending(sessionId, responder) }, 3000)
-    const { result, fellBackTo } = await promptWithFallback(sessionId, promptParts, pinnedModel, autoVariant)
+    const { result, fellBackTo, hardError, skippedDead } = await promptWithFallback(
+      sessionId,
+      promptParts,
+      pinnedModel,
+      autoVariant,
+    )
     clearInterval(poller)
     log("engine", `handleMessage: prompt returned (fellBackTo=${fellBackTo ?? "no"}, hasData=${!!result.data}, err=${!!(result as any).error})`)
     await resolvePending(sessionId, responder)
@@ -1228,9 +1303,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
     statusLines.delete(sessionId)
 
     if ((result as any).error || !result.data) {
-      console.error("Prompt failed:", (result as any).error)
+      console.error("Prompt failed:", (result as any).error, hardError ?? "")
       await statusHandle.finalize("⚠️ error").catch(() => {})
-      await responder.sendText("⚠️ Something went wrong. Try again or /new.")
+      const pin = pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "the model"
+      await responder.sendText(hardError ? hardErrorNotice(pin, hardError) : "⚠️ Something went wrong. Try again or /new.")
       return
     }
 
@@ -1276,8 +1352,17 @@ export async function createEngine(config: GatewayConfig): Promise<{
       void reviewAndRemember(channelId, msg.conversationId, msg.text, reply)
     } else {
       const errorPart = parts?.find((p) => p.type === "retry")
-      const errorMsg = errorPart ? `⚠️ ${(errorPart as any).error?.data?.message || "Error"}` : "⚠️ No text response"
-      await statusHandle.finalize(`${modelLabel}\n${errorMsg}`).catch(() => {})
+      const rawErr = hardError || (errorPart as any)?.error?.data?.message || "No text response"
+      await statusHandle.finalize(`${modelLabel}\n⚠️ ${String(rawErr).slice(0, 80)}`).catch(() => {})
+      // Always tell the user something actionable instead of a silent dead end.
+      const pin = pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "the model"
+      await responder
+        .sendText(
+          hardError
+            ? hardErrorNotice(pin, hardError)
+            : "⚠️ The model returned no text. Try again, switch with /model, or /new.",
+        )
+        .catch(() => {})
     }
   }
 
