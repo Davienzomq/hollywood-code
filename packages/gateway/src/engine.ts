@@ -1035,8 +1035,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // Turn a raw provider error into a clear, actionable message for the user.
   const hardErrorNotice = (model: string, err: string): string => {
     const low = (err || "").toLowerCase()
+    // Many providers (incl. opencode zen) put the reset window in the error text
+    // ("...will reset in 2 hours" / "resets at 1:54 PM") — surface it if present.
+    const resetM = (err || "").match(/reset[s]?\b[^.\n]*?\b(in\s+[\w.\s]+?(?:second|minute|hour|day)s?|at\s+[\d:apm.\s]+)/i)
+    const reset = resetM ? ` — resets ${resetM[1].trim()}` : ""
     if (/usage limit|plan|quota/.test(low))
-      return `⚠️ *${model}* hit its usage limit (ChatGPT Plus caps the top models like gpt-5.5). Switch with /model — e.g. \`gpt-5.4-mini\` — or wait for the limit to reset.`
+      return `⚠️ *${model}* hit its usage limit (plans like ChatGPT Plus cap the top models)${reset}. Switch with /model — e.g. \`gpt-5.4-mini\` — or wait for the reset.`
     if (/rate.?limit|too many|429/.test(low))
       return `⚠️ *${model}* is rate-limited right now. Try again shortly, or switch with /model.`
     if (/401|403|unauthor|api key|invalid|credit|billing|insufficient/.test(low))
