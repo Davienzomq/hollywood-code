@@ -85,10 +85,12 @@ beforeAll(async () => {
       model: {
         current: () => ({ id: "model", provider: { id: "provider" } }),
         variant: { current: () => variant },
+        auto: () => "off" as const,
       },
       agent: {
         current: () => ({ name: "agent" }),
       },
+      personality: () => undefined,
       session: {
         promote(directory: string, sessionID: string) {
           promoted.push({ directory, sessionID })
