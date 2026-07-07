@@ -49,6 +49,9 @@ export async function startGateway(config: GatewayConfig) {
       console.log(`⚡ ${adapter.label} online (${ch.allowedIds.length} paired)`)
     } catch (err) {
       console.error(`Failed to start ${adapter.label}:`, err)
+      // start() may have half-initialized listeners/timers before throwing —
+      // best-effort stop so a failed adapter can't leak resources.
+      void adapter.stop().catch(() => {})
     }
   }
 
@@ -77,9 +80,17 @@ export async function startGateway(config: GatewayConfig) {
   const shutdown = () => {
     console.log("\nShutting down gateway...")
     scheduler.stop()
-    for (const a of adapters) void a.stop().catch(() => {})
-    engine.stop()
-    process.exit(0)
+    // Give adapters a real chance to close their sockets/queues before exiting
+    // (previously fire-and-forget + immediate exit cut cleanup short). Bounded
+    // by 3s so a hung adapter can never block shutdown.
+    void (async () => {
+      await Promise.race([
+        Promise.allSettled(adapters.map((a) => a.stop().catch(() => {}))),
+        new Promise((r) => setTimeout(r, 3000)),
+      ])
+      engine.stop()
+      process.exit(0)
+    })()
   }
   process.on("SIGINT", shutdown)
   process.on("SIGTERM", shutdown)

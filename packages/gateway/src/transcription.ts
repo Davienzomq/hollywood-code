@@ -69,8 +69,15 @@ function createPiperSpeaker(cfg: VoiceConfig): Speaker {
             reject(err)
           }
         })
-        proc.stdin.write(text.slice(0, 4000))
-        proc.stdin.end()
+        // stdin errors (EPIPE when the binary is missing/dies early) are emitted
+        // on the STREAM — unhandled they'd crash the whole gateway process.
+        proc.stdin.on("error", () => {})
+        try {
+          proc.stdin.write(text.slice(0, 4000))
+          proc.stdin.end()
+        } catch (err) {
+          reject(err)
+        }
       })
     },
   }
@@ -148,7 +155,10 @@ function createLocalTranscriber(cfg: VoiceConfig): Transcriber {
       try {
         fs.writeFileSync(ogg, audio)
         await run(ffmpegBin, ["-i", ogg, "-ar", "16000", "-ac", "1", "-y", wav])
-        await run(whisperBin, ["-m", whisperModel, "-f", wav, "-l", "auto", "-otxt", "-nt", "-of", prefix])
+        // -t <threads>: whisper.cpp defaults to 4 threads; using the machine's
+        // real cores (capped) meaningfully speeds up transcription of each note.
+        const threads = String(Math.min(8, Math.max(1, os.cpus().length)))
+        await run(whisperBin, ["-m", whisperModel, "-f", wav, "-l", "auto", "-otxt", "-nt", "-t", threads, "-of", prefix])
         const text = fs.readFileSync(txt, "utf8").trim()
         return text
       } finally {

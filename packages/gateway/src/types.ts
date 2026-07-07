@@ -67,6 +67,8 @@ export interface Responder {
   askQuestion(ask: QuestionAsk): Promise<string>
   /** Send a spoken reply (voice note), if the channel supports it. */
   sendVoice?(audio: Uint8Array): Promise<void>
+  /** Send a file attachment (e.g. a long transcript as .md), if supported. */
+  sendFile?(data: Uint8Array, filename: string, caption?: string): Promise<void>
 }
 
 /**

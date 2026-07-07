@@ -6,6 +6,24 @@ import type { ChannelAdapter, GatewayContext, Responder, StatusHandle, IncomingM
 
 const TELEGRAM_MAX = 4096
 
+// ── Lightweight markdown → Telegram HTML ─────────────────────────────────────
+// Agent replies are full of ``` blocks, `code` and **bold** that used to arrive
+// as raw markdown. Convert conservatively PER CHUNK: escape everything first,
+// then re-introduce only the tags we can guarantee are balanced; if anything
+// looks unbalanced, return undefined and the caller sends plain text. A failed
+// HTML send also falls back to plain, so formatting can never lose a message.
+const escHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+function mdToTelegramHtml(chunk: string): string | undefined {
+  const hasMarkers = /```|`[^`\n]+`|\*\*[^*\n]+\*\*/.test(chunk)
+  if (!hasMarkers) return undefined
+  if (((chunk.match(/```/g) ?? []).length) % 2 !== 0) return undefined // split fence → plain
+  let out = escHtml(chunk)
+  out = out.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, _lang, code) => `<pre>${code}</pre>`)
+  out = out.replace(/`([^`\n]+)`/g, (_m, c) => `<code>${c}</code>`)
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, (_m, b) => `<b>${b}</b>`)
+  return out
+}
+
 // Per-adapter incrementing counter for callback_data keys.
 // Kept module-level so each createTelegramAdapter() call gets its own closure.
 
@@ -72,11 +90,21 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
   // ── Responder factory ─────────────────────────────────────────────────────
 
   function makeResponder(chatId: number, gramCtx?: Context): Responder {
-    // sendText: chunk at 4096 chars
+    // sendText: chunk at 4096 chars; try formatted HTML per chunk, fall back to
+    // plain on any parse rejection so a message is never lost to formatting.
     const sendText = async (text: string): Promise<void> => {
       if (!text) return
       for (let i = 0; i < text.length; i += TELEGRAM_MAX) {
         const chunk = text.slice(i, i + TELEGRAM_MAX)
+        const html = mdToTelegramHtml(chunk)
+        if (html && html.length <= TELEGRAM_MAX) {
+          try {
+            await bot.api.sendMessage(chatId, html, { parse_mode: "HTML" })
+            continue
+          } catch {
+            /* fall through to plain */
+          }
+        }
         if (gramCtx) {
           await gramCtx.reply(chunk)
         } else {
@@ -110,7 +138,20 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
     const askPermission = (ask: { action: string; detail: string }): Promise<"once" | "always" | "reject"> => {
       return new Promise(async (resolve) => {
         const key = String(++cbSeq)
-        pendingPerms.set(key, resolve)
+        let settled = false
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const settle = (val: "once" | "always" | "reject") => {
+          if (settled) return
+          settled = true
+          if (timer) clearTimeout(timer)
+          pendingPerms.delete(key)
+          resolve(val)
+        }
+        pendingPerms.set(key, settle)
+        // Questions auto-cancel after 3 min but permissions never did — an
+        // unanswered request left a pending promise + map entry forever. Deny
+        // after 10 min (safe default; the agent proceeds without the action).
+        timer = setTimeout(() => settle("reject"), 10 * 60 * 1000)
         const text = `🔐 Permission request:\n${ask.action}\n${ask.detail}`.slice(0, TELEGRAM_MAX)
         await bot.api
           .sendMessage(chatId, text, {
@@ -124,11 +165,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
               ],
             },
           })
-          .catch(() => {
-            // If send fails, clean up and reject with "reject" so the engine keeps going.
-            pendingPerms.delete(key)
-            resolve("reject")
-          })
+          .catch(() => settle("reject"))
       })
     }
 
@@ -148,8 +185,10 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
           resolve(val)
         }
         pendingQuestions.set(key, settle)
+        // Telegram allows up to 100 inline buttons; the old cap of 8 HID options
+        // (e.g. OpenAI's model list overflows 8 — the rest were unpickable).
         const rows = ask.options
-          .slice(0, 8)
+          .slice(0, 30)
           .map((label: string, i: number) => [
             { text: label.slice(0, 60), callback_data: `qa:${key}:${i}` },
           ])
@@ -178,7 +217,16 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       }
     }
 
-    return { sendText, typing, startStatus, askPermission, askQuestion, sendVoice }
+    // File attachment (long transcripts etc.) — falls back to text on failure.
+    const sendFile = async (data: Uint8Array, filename: string, caption?: string): Promise<void> => {
+      try {
+        await bot.api.sendDocument(chatId, new InputFile(data, filename), caption ? { caption: caption.slice(0, 1024) } : undefined)
+      } catch (err: any) {
+        await bot.api.sendMessage(chatId, `(file send failed: ${err?.message ?? err})`).catch(() => {})
+      }
+    }
+
+    return { sendText, typing, startStatus, askPermission, askQuestion, sendVoice, sendFile }
   }
 
   // ── ChannelAdapter implementation ─────────────────────────────────────────
@@ -233,7 +281,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
     // Full command list the engine handles (mirrors packages/telegram + the
     // gateway's Phase C/D additions + the CLI-only stubs).
     const commands = [
-      "new", "clear", "status", "stop", "model", "sessions", "s",
+      "new", "clear", "status", "stop", "model", "session", "sessions", "s",
       "cost", "usage", "undo", "compact", "rename", "fork",
       "export", "copy", "agents", "skills", "init", "share",
       "review", "move", "thinking", "autoallow", "remote", "help", "start",
@@ -326,7 +374,14 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
 
     bot.on("message:text", (gramCtx: Context) => {
       const text: string = (gramCtx.message as any)?.text ?? ""
-      if (text.startsWith("/")) return
+      if (text.startsWith("/")) {
+        // Registered commands were already handled by bot.command() middleware
+        // (which ends the chain) — reaching here means the command is UNKNOWN.
+        // It used to die silently; now the user gets a pointer instead of limbo.
+        const word = text.slice(1).split(/[\s@]/, 1)[0] ?? ""
+        void gramCtx.reply(`❓ Unknown command /${word} — see /help for the full list.`).catch(() => {})
+        return
+      }
 
       // DETACHED: grammy processes updates sequentially. Awaiting the prompt
       // here would block Allow/Deny callback queries from being handled:
@@ -357,16 +412,21 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       void (async () => {
         const chatId = gramCtx.chat!.id
         const userId = gramCtx.from!.id.toString()
+        // Immediate feedback: local whisper can take several seconds and the
+        // user used to stare at nothing. The note is edited into the transcript.
+        const note = await gramCtx.reply("🎤 Transcribing…").catch(() => undefined)
         try {
           const file = await gramCtx.getFile() // works for voice + audio
           const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`
           const buf = new Uint8Array(await (await fetch(url)).arrayBuffer())
           const text = await ctx.transcribe!(buf, "voice.ogg")
           if (!text) {
-            await gramCtx.reply("🎤 Couldn't transcribe that audio.").catch(() => {})
+            if (note) await bot.api.editMessageText(chatId, note.message_id, "🎤 Couldn't transcribe that audio.").catch(() => {})
+            else await gramCtx.reply("🎤 Couldn't transcribe that audio.").catch(() => {})
             return
           }
-          await gramCtx.reply(`🎤 "${text}"`).catch(() => {})
+          if (note) await bot.api.editMessageText(chatId, note.message_id, `🎤 "${text}"`.slice(0, TELEGRAM_MAX)).catch(() => {})
+          else await gramCtx.reply(`🎤 "${text}"`).catch(() => {})
           const incomingMsg: IncomingMessage = { conversationId: chatId.toString(), userId, text, audio: true }
           const responder = makeResponder(chatId, gramCtx)
           if (text.startsWith("/")) {
@@ -390,9 +450,49 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
     bot.on(["message:photo", "message:document"], (gramCtx: Context) => {
       const m = gramCtx.message as any
       const photos = m?.photo as Array<{ file_id: string }> | undefined
-      const doc = m?.document as { file_id: string; mime_type?: string; file_name?: string } | undefined
+      const doc = m?.document as { file_id: string; mime_type?: string; file_name?: string; file_size?: number } | undefined
       const isImageDoc = !!doc && typeof doc.mime_type === "string" && doc.mime_type.startsWith("image/")
-      if (!photos?.length && !isImageDoc) return // not an image — ignore (other docs unsupported)
+
+      // TEXT documents (PRD.md, .txt, code files…) used to be ignored in total
+      // silence — the user sent a file and nothing happened. Inline them into
+      // the prompt so the agent can read them directly.
+      const TEXT_EXT = /\.(md|txt|json|jsonc|yaml|yml|csv|log|ts|tsx|js|jsx|py|go|rs|java|rb|sh|ps1|css|html|xml|sql|toml|ini|env)$/i
+      const isTextDoc =
+        !!doc &&
+        !isImageDoc &&
+        ((typeof doc.mime_type === "string" && (doc.mime_type.startsWith("text/") || doc.mime_type === "application/json")) ||
+          TEXT_EXT.test(doc.file_name ?? ""))
+      if (isTextDoc) {
+        void (async () => {
+          const chatId = gramCtx.chat!.id
+          const userId = gramCtx.from!.id.toString()
+          const responder = makeResponder(chatId, gramCtx)
+          try {
+            const MAX_TEXT_DOC = 256 * 1024
+            if ((doc!.file_size ?? 0) > MAX_TEXT_DOC) {
+              await responder.sendText(`⚠️ ${doc!.file_name ?? "File"} is too large to inline (max 256 KB). Put it in the project and ask me to read it.`)
+              return
+            }
+            const file = await gramCtx.api.getFile(doc!.file_id)
+            const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`
+            const content = Buffer.from(await (await fetch(url)).arrayBuffer()).toString("utf8")
+            const caption: string = m?.caption ?? ""
+            const name = doc!.file_name ?? "file.txt"
+            const text = `${caption || `I'm sending you the file ${name} — read it.`}\n\n📎 ${name}:\n\`\`\`\n${content}\n\`\`\``
+            await ctx.handleMessage("telegram", { conversationId: chatId.toString(), userId, text }, responder)
+          } catch (err: any) {
+            ctx.log("telegram", `text-doc handling failed: ${err?.message ?? err}`)
+            try { await responder.sendText(`⚠️ Couldn't read that file: ${err?.message ?? err}`) } catch { /* ignore */ }
+          }
+        })()
+        return
+      }
+
+      if (!photos?.length && !isImageDoc) {
+        // Unsupported document type — say so instead of dying silently.
+        void gramCtx.reply("📎 I can read images and text files (.md, .txt, code). This file type isn't supported yet.").catch(() => {})
+        return
+      }
 
       void (async () => {
         const chatId = gramCtx.chat!.id
@@ -469,7 +569,10 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
     })
 
     // bot.start() never resolves until stopped — run detached so start() returns.
+    // drop_pending_updates: after downtime the bot used to replay the queued
+    // backlog and answer stale messages; start fresh instead.
     bot.start({
+      drop_pending_updates: true,
       onStart: (info) =>
         ctx.log("telegram", `Bot online as @${info.username}`),
     })

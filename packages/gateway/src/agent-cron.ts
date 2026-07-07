@@ -288,19 +288,46 @@ export function processAgentInbox(deps: AgentInboxDeps) {
   }
   for (const f of files) {
     const inPath = path.join(IN_DIR, f)
+    // CLAIM the request before any async work: this poller runs every 2s, and a
+    // request whose handling takes longer (slow deliver/TTS) would otherwise be
+    // read AGAIN on the next tick → duplicate cron jobs / duplicate messages.
+    // renameSync is atomic on the same dir; if another tick already claimed it,
+    // the rename throws and we skip.
+    const workPath = inPath + ".working"
+    try {
+      fs.renameSync(inPath, workPath)
+    } catch {
+      continue // already claimed (or gone)
+    }
     let req: AgentRequest
     try {
-      req = JSON.parse(fs.readFileSync(inPath, "utf8")) as AgentRequest
+      req = JSON.parse(fs.readFileSync(workPath, "utf8")) as AgentRequest
     } catch {
-      try { fs.unlinkSync(inPath) } catch {}
+      try { fs.unlinkSync(workPath) } catch {}
       continue
     }
     const respond = (ok: boolean, message: string) => {
       try { fs.writeFileSync(path.join(OUT_DIR, req.id + ".json"), JSON.stringify({ ok, message })) } catch {}
-      try { fs.unlinkSync(inPath) } catch {}
+      try { fs.unlinkSync(workPath) } catch {}
     }
     void handleRequest(req, deps, respond)
   }
+  // Housekeeping: responses the tool never picked up (its poll window is ~12s)
+  // and .working claims orphaned by a crash accumulate forever — sweep >10min old.
+  const TEN_MIN = 10 * 60_000
+  const sweep = (dir: string, suffix: string) => {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith(suffix)) continue
+        const p = path.join(dir, f)
+        try {
+          if (Date.now() - fs.statSync(p).mtimeMs > TEN_MIN) fs.unlinkSync(p)
+        } catch {}
+      }
+    } catch {}
+  }
+  sweep(OUT_DIR, ".json")
+  sweep(IN_DIR, ".working")
 }
 
 async function handleRequest(req: AgentRequest, deps: AgentInboxDeps, respond: (ok: boolean, message: string) => void) {
@@ -340,14 +367,17 @@ async function handleRequest(req: AgentRequest, deps: AgentInboxDeps, respond: (
     // default: cron
     if (!deps.scheduler) { respond(false, "Scheduler is not available."); return }
     const chat = deps.chatForSession(req.sessionID)
-    if (!chat && req.action !== "list") { respond(false, "Could not resolve which chat to deliver to."); return }
+    // Fail CLOSED for every action: when the session can't be resolved to a chat,
+    // "list" must not fall back to showing every conversation's jobs (their
+    // prompts + destinations would leak across chats/channels).
+    if (!chat) { respond(false, "Could not resolve which chat this session belongs to."); return }
     if (req.action === "create") {
       if (!req.schedule || !req.prompt) { respond(false, "Both a schedule (cron) and a prompt are required."); return }
       const job = deps.scheduler.add({ cron: req.schedule, prompt: req.prompt, channelId: chat!.channelId, conversationId: chat!.conversationId })
       deps.log("cron", `agent scheduled job ${job.id}: ${req.prompt.slice(0, 50)}`)
       respond(true, `Scheduled job ${job.id} — runs on "${req.schedule}". Remove with action="remove", job_id="${job.id}".`)
     } else if (req.action === "list") {
-      const jobs = deps.scheduler.list().filter((j) => !chat || (j.channelId === chat.channelId && j.conversationId === chat.conversationId))
+      const jobs = deps.scheduler.list().filter((j) => j.channelId === chat.channelId && j.conversationId === chat.conversationId)
       respond(true, jobs.length ? "Scheduled jobs:\n" + jobs.map((j) => `- ${j.id}: "${j.prompt}" (${j.cron})`).join("\n") : "No scheduled jobs.")
     } else if (req.action === "remove") {
       if (!req.job_id) { respond(false, "job_id is required to remove a job."); return }

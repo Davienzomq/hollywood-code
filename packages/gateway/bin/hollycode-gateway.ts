@@ -103,6 +103,25 @@ if (installStartupFlag) {
 }
 
 if (bridgeMode || foreground) {
+  // --foreground used to skip killStray entirely: debugging alongside a
+  // forgotten background instance meant two gateways polling the same bot
+  // token (Telegram 409 wars). Foreground now clears strays too; --bridge is
+  // spawned BY the launcher which already ran killStray (and killing here
+  // would race our own parent).
+  if (foreground && !bridgeMode) killStray()
+  // Write the pidfile killStray() reads — it was dead code before (nothing
+  // ever wrote it), leaving only the command-line pattern match to prevent
+  // duplicate instances. Best-effort cleanup on exit.
+  try {
+    fs.mkdirSync(path.dirname(PIDFILE), { recursive: true })
+    fs.writeFileSync(PIDFILE, JSON.stringify({ bot: process.pid }))
+    process.on("exit", () => {
+      try {
+        const cur = JSON.parse(fs.readFileSync(PIDFILE, "utf8")) as { bot?: number }
+        if (cur.bot === process.pid) fs.unlinkSync(PIDFILE)
+      } catch {}
+    })
+  } catch {}
   await startGateway(config)
 } else {
   // Launch detached + hidden so closing the window doesn't kill the gateway.
@@ -118,13 +137,22 @@ if (bridgeMode || foreground) {
   const errFile = path.join(logDir, `gateway-${ts}.err`)
   const passthrough = [...(cliDirectory ? ["--directory", cliDirectory] : [])]
 
+  // The launcher used to print "✅ connected" UNCONDITIONALLY — if Start-Process
+  // failed (execution policy, bad path) the user was told the gateway was live
+  // when nothing was running. Check the spawn result and fail loudly.
+  let launched = true
   if (process.platform === "win32") {
     const psArgs = ["run", SELF, "--bridge", ...passthrough].map((a) => `'"${a.replaceAll("'", "''")}"'`).join(",")
     const psCmd =
       `Start-Process -FilePath '${process.execPath}' -ArgumentList @(${psArgs}) ` +
       `-WindowStyle Hidden -WorkingDirectory '${PKG_DIR}' ` +
       `-RedirectStandardOutput '${logFile}' -RedirectStandardError '${errFile}'`
-    spawnSync("powershell.exe", ["-NoProfile", "-Command", psCmd], { stdio: "ignore", timeout: 20000 })
+    const r = spawnSync("powershell.exe", ["-NoProfile", "-Command", psCmd], { stdio: "pipe", timeout: 20000 })
+    if (r.error || r.status !== 0) {
+      launched = false
+      console.error("⚠️  Could not launch the background gateway:")
+      console.error("   " + (r.error?.message ?? r.stderr?.toString().trim() ?? `powershell exited ${r.status}`))
+    }
   } else {
     const out = fs.openSync(logFile, "a")
     const err = fs.openSync(errFile, "a")
@@ -133,7 +161,14 @@ if (bridgeMode || foreground) {
       detached: true,
       stdio: ["ignore", out, err],
     })
+    child.on("error", (e) => {
+      console.error("⚠️  Could not launch the background gateway:", e.message)
+    })
     child.unref()
+  }
+  if (!launched) {
+    console.error("   Try: hollycode-gateway --foreground   (runs attached, shows the real error)")
+    process.exit(1)
   }
 
   const channels = activeChannels(config).map((c) => c.id).join(", ") || "(none)"

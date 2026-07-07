@@ -84,7 +84,10 @@ export function createScheduler(deps: SchedulerDeps): SchedulerHandle {
 
   const schedule = (job: CronJob) => {
     try {
-      const c = new Cron(job.cron, () => void fire(job))
+      // protect: true — croner skips a fire while the previous run of the SAME
+      // job is still in flight (runPrompt is an LLM call that can outlast short
+      // intervals; overlapping runs hammered the same session concurrently).
+      const c = new Cron(job.cron, { protect: true }, () => void fire(job))
       crons.set(job.id, c)
     } catch (err: any) {
       deps.log("cron", `invalid cron "${job.cron}" for job ${job.id}: ${err?.message ?? err}`)
@@ -93,7 +96,16 @@ export function createScheduler(deps: SchedulerDeps): SchedulerHandle {
 
   return {
     add(partial) {
-      const job: CronJob = { ...partial, id: Math.random().toString(36).slice(2, 9), createdAt: Date.now() }
+      // Validate the cron BEFORE persisting: an invalid expression used to be
+      // saved + confirmed ("Scheduled ✓") but never fire — a silent lie. Throw
+      // here so callers (/schedule, the cronjob agent tool) report it instead.
+      const probe = new Cron(partial.cron, { paused: true }, () => {})
+      probe.stop()
+      let id = ""
+      do {
+        id = crypto.randomUUID().slice(0, 8)
+      } while (jobs.some((j) => j.id === id))
+      const job: CronJob = { ...partial, id, createdAt: Date.now() }
       jobs.push(job)
       saveJobs(jobs)
       schedule(job)

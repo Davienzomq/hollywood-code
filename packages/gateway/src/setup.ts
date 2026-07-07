@@ -139,7 +139,12 @@ async function setupTelegram(rl: readline.Interface): Promise<ChannelConfig> {
   const allowedIds: string[] = []
   for (;;) {
     const upd = await tg(token, "getUpdates", { timeout: 30, offset }).catch(() => undefined)
-    if (!upd?.ok || !upd.result?.length) continue
+    if (!upd?.ok || !upd.result?.length) {
+      // A fast-failing fetch (network down) would spin this loop at full speed —
+      // back off a second before retrying.
+      if (!upd) await new Promise((r) => setTimeout(r, 1000))
+      continue
+    }
     for (const u of upd.result) {
       offset = u.update_id + 1
       const from = u.message?.from

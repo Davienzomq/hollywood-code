@@ -370,6 +370,36 @@ export async function createEngine(config: GatewayConfig): Promise<{
   const lastActivity = new Map<string, number>()
   // sessionID → the tool currently RUNNING (transient last status line).
   const statusRunning = new Map<string, string>()
+  // Coalesce status edits: Telegram allows ~1 edit/sec per message, and a burst
+  // of quick tool completions used to fire an edit per event — 429s and dropped
+  // updates. At most one edit per 1.2s per session, with a trailing flush so the
+  // final state always lands.
+  const statusEditState = new Map<string, { last: number; timer?: ReturnType<typeof setTimeout>; text: string }>()
+  const pushStatusEdit = (sessionID: string, text: string) => {
+    const st = statusEditState.get(sessionID) ?? { last: 0, text: "" }
+    st.text = text
+    statusEditState.set(sessionID, st)
+    const since = Date.now() - st.last
+    if (since >= 1200) {
+      st.last = Date.now()
+      const h = statusHandles.get(sessionID)
+      if (h) void h.update(text).catch(() => {})
+      return
+    }
+    if (!st.timer) {
+      st.timer = setTimeout(() => {
+        st.timer = undefined
+        st.last = Date.now()
+        const h = statusHandles.get(sessionID)
+        if (h) void h.update(st.text).catch(() => {})
+      }, 1200 - since)
+    }
+  }
+  const clearStatusEdit = (sessionID: string) => {
+    const st = statusEditState.get(sessionID)
+    if (st?.timer) clearTimeout(st.timer)
+    statusEditState.delete(sessionID)
+  }
   const startEvents = () => {
     eventAbort.abort()
     eventAbort = new AbortController()
@@ -457,7 +487,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
         }
         const running = statusRunning.get(part.sessionID)
         const text = "🎬 working...\n" + [...lines.slice(-8), ...(running ? [running] : [])].join("\n")
-        await handle.update(text).catch(() => {})
+        pushStatusEdit(part.sessionID, text)
       }
           if (sig.aborted) break
           log("engine", "event stream ended — reconnecting")
@@ -490,6 +520,9 @@ export async function createEngine(config: GatewayConfig): Promise<{
   }
 
   const resolvePending = async (sid: string, responder: Responder) => {
+    // The de-dup set only ever grew (every permission/question id, forever).
+    // It only needs to cover in-flight requests — reset when it gets large.
+    if (notified.size > 2000) notified.clear()
     // v1 global permissions
     const globalPerms = await opencodeV2.permission.list({}).catch(() => null)
     const v1Requests: any[] = (globalPerms?.data as any) ?? []
@@ -1268,7 +1301,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // handleMessage
   // ---------------------------------------------------------------------------
 
-  const handleMessage = async (
+  const handleMessageInner = async (
     channelId: string,
     msg: {
       conversationId: string
@@ -1409,6 +1442,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
     statusHandles.delete(sessionId)
     statusLines.delete(sessionId)
     statusRunning.delete(sessionId)
+    clearStatusEdit(sessionId)
+    // Slow-leak hygiene: these grow per turn/session and were never pruned.
+    lastActivity.delete(sessionId)
+    autoResolved.delete(sessionId)
 
     if ((result as any).error || !result.data) {
       console.error("Prompt failed:", (result as any).error, hardError ?? "")
@@ -1474,6 +1511,28 @@ export async function createEngine(config: GatewayConfig): Promise<{
         )
         .catch(() => {})
     }
+  }
+
+  // FIFO queue per conversation: two quick messages used to run two prompts
+  // CONCURRENTLY against the same session (interleaved turns, racing results).
+  // Queue them in arrival order; the user is told when a message is queued.
+  // Commands (/stop, /model, …) intentionally BYPASS this queue.
+  const turnQueues = new Map<string, Promise<void>>()
+  const handleMessage = (
+    channelId: string,
+    msg: Parameters<typeof handleMessageInner>[1],
+    responder: Responder,
+  ): Promise<void> => {
+    const qkey = `${channelId}:${msg.conversationId}`
+    const prev = turnQueues.get(qkey)
+    if (prev) void responder.sendText("📥 Queued — I'll take this right after the current task.").catch(() => {})
+    const run = (prev ?? Promise.resolve()).then(() => handleMessageInner(channelId, msg, responder))
+    const cleanup = () => {
+      if (turnQueues.get(qkey) === tracked) turnQueues.delete(qkey)
+    }
+    const tracked: Promise<void> = run.then(cleanup, cleanup)
+    turnQueues.set(qkey, tracked)
+    return run
   }
 
   // ---------------------------------------------------------------------------
@@ -1736,8 +1795,20 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
       case "undo": {
         if (!sid) { await responder.sendText("No active session."); break }
-        await opencode.client.session.revert({ path: { id: sid } }).catch(() => {})
-        await responder.sendText("↩️ Undone last message.")
+        // revert REQUIRES a messageID (like /rewind passes) — calling it bare
+        // 400'd into a swallowed .catch and still replied "Undone" (false
+        // success). Find the last USER message and revert to it for real.
+        const msgs = await opencode.client.session.messages({ path: { id: sid } }).catch(() => null)
+        const lastUser = (((msgs?.data as any[]) ?? []) as any[])
+          .filter((m: any) => (m.role ?? m.info?.role) === "user")
+          .pop()
+        const messageID: string | undefined = lastUser?.id ?? lastUser?.info?.id
+        if (!messageID) { await responder.sendText("Nothing to undo yet."); break }
+        const r = await opencode.client.session
+          .revert({ path: { id: sid }, body: { messageID } })
+          .then(() => true)
+          .catch(() => false)
+        await responder.sendText(r ? "↩️ Undone — last exchange reverted. /redo restores it." : "⚠️ Undo failed — try /rewind for a picker.")
         break
       }
 
@@ -1846,7 +1917,9 @@ export async function createEngine(config: GatewayConfig): Promise<{
         const since = Date.now() - days * 86400000
         const list = await opencode.client.session.list({}).catch(() => null)
         const all: any[] = (list?.data as any[]) ?? []
-        const recent = all.filter((s: any) => (s.time?.updated ?? s.time?.created ?? 0) >= since || true).slice(0, 50)
+        // (A leftover "|| true" used to disable this date filter entirely —
+        // /insights 1 and /insights 30 returned identical numbers.)
+        const recent = all.filter((s: any) => (s.time?.updated ?? s.time?.created ?? 0) >= since).slice(0, 50)
         let sessions = 0
         let assistantMsgs = 0
         const models = new Map<string, number>()
@@ -1881,11 +1954,18 @@ export async function createEngine(config: GatewayConfig): Promise<{
       case "sessions":
       case "s": {
         if (args) {
+          // Validate the id exists BEFORE switching — a typo used to point the
+          // conversation at a nonexistent session and every prompt then failed.
+          const target = await opencode.client.session.get({ path: { id: args } }).catch(() => null)
+          if (!target?.data) {
+            await responder.sendText(`⚠️ No session found with id "${args}" — run /sessions to pick from the list.`)
+            break
+          }
           const key = sessionKey(channelId, conversationId)
           sessionMap.delete(key)
           sessionMap.set(key, args)
           saveStore()
-          await responder.sendText(`✅ Switched to session: ${args}`)
+          await responder.sendText(`✅ Switched to: ${(target.data as any).title || args}\nSend a message — I'll continue with this session's history.`)
           break
         }
         const list = await opencode.client.session.list({}).catch(() => null)
@@ -2004,10 +2084,28 @@ export async function createEngine(config: GatewayConfig): Promise<{
         if (!sid) { await responder.sendText("No active session."); break }
         const msgs = await opencode.client.session.messages({ path: { id: sid } }).catch(() => null)
         if (!msgs?.data) { await responder.sendText("No messages."); break }
-        const lines = (msgs.data as any[]).map(
-          (m: any) => `[${m.role}]\n${m.parts?.map((p: any) => p.text || "").join("\n") || ""}`,
-        )
-        await responder.sendText(lines.join("\n\n") || "(empty transcript)")
+        // Messages come as {info, parts} — reading m.role printed "[undefined]"
+        // on every line. Read the real role, and ship long transcripts as a .md
+        // FILE instead of flooding the chat with dozens of 4096-char messages.
+        const lines = (msgs.data as any[]).map((m: any) => {
+          const info = m.info ?? m
+          const body = (m.parts as any[] | undefined)
+            ?.filter((p: any) => p.type === "text")
+            .map((p: any) => p.text || "")
+            .join("\n")
+            .trim()
+          return `## ${info.role ?? "?"}\n\n${body || "(no text)"}`
+        })
+        const transcript = lines.join("\n\n") || "(empty transcript)"
+        if (transcript.length > 3500 && responder.sendFile) {
+          await responder.sendFile(
+            new TextEncoder().encode(`# Transcript — ${sid}\n\n${transcript}\n`),
+            `transcript-${sid.slice(0, 12)}.md`,
+            "📄 Full transcript attached",
+          )
+        } else {
+          await responder.sendText(transcript)
+        }
         break
       }
 
@@ -2044,7 +2142,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
         if (!sid) { await responder.sendText("No active session."); break }
         const res = await opencode.client.session.share({ path: { id: sid } }).catch(() => null)
         if (!res?.data) { await responder.sendText("⚠️ Share failed."); break }
-        await responder.sendText(`🔗 Shared: ${(res.data as any).url || (res.data as any).id}`)
+        // The share URL lives at data.share.url (data.url is undefined — this
+        // used to print the session ID instead of the actual link).
+        const d = res.data as any
+        const url = d.share?.url ?? d.url
+        await responder.sendText(url ? `🔗 Shared: ${url}` : "⚠️ Shared, but no URL came back — try /share again.")
         break
       }
 
