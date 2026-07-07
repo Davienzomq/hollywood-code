@@ -368,16 +368,29 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // stalled" (a quota/credit error the SDK retries with no output), so it only
   // falls back on a real stall — never on a long-running task.
   const lastActivity = new Map<string, number>()
+  // sessionID → the tool currently RUNNING (transient last status line).
+  const statusRunning = new Map<string, string>()
   const startEvents = () => {
     eventAbort.abort()
     eventAbort = new AbortController()
     const sig = eventAbort.signal
     void (async () => {
-      const events = await opencode.client.event.subscribe()
+      // The SSE stream can drop silently (network hiccup, server pause). Without
+      // reconnection, tool progress stops reaching Telegram ("working..." forever)
+      // AND lastActivity goes stale, so the stall watcher falsely kills a WORKING
+      // model. Reconnect forever with backoff; on every (re)connect bump active
+      // sessions so blind time never counts as model inactivity.
       const compactStarted = new Set<string>()
       const compactEnded = new Set<string>()
-      for await (const event of events.stream) {
-        if (sig.aborted) break
+      let attempt = 0
+      while (!sig.aborted) {
+        try {
+          const events = await opencode.client.event.subscribe()
+          attempt = 0
+          log("engine", "event stream connected")
+          for (const k of statusHandles.keys()) lastActivity.set(k, Date.now())
+          for await (const event of events.stream) {
+            if (sig.aborted) break
 
         // Any message event for a session = its model is alive and producing
         // output. Stamp it so the stall watcher won't abort a working long task.
@@ -422,14 +435,41 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
         if (event.type !== "message.part.updated") continue
         const part = event.properties.part as ToolPart
-        if (part.type !== "tool" || part.state.status !== "completed") continue
+        if (part.type !== "tool") continue
         const handle = statusHandles.get(part.sessionID)
         if (!handle) continue
         const lines = statusLines.get(part.sessionID) ?? []
-        lines.push(`✓ ${part.tool} — ${part.state.title}`)
-        statusLines.set(part.sessionID, lines)
-        const text = "🎬 working...\n" + lines.slice(-8).join("\n")
+        const st: any = part.state
+        if (st.status === "running") {
+          // Live line for the tool in flight — long bash/computeruse steps show
+          // up immediately instead of only after they complete.
+          statusRunning.set(part.sessionID, `⏳ ${part.tool}${st.title ? ` — ${st.title}` : "…"}`)
+        } else if (st.status === "completed") {
+          lines.push(`✓ ${part.tool} — ${st.title}`)
+          statusLines.set(part.sessionID, lines)
+          statusRunning.delete(part.sessionID)
+        } else if (st.status === "error") {
+          lines.push(`✗ ${part.tool} — ${st.error ?? "error"}`)
+          statusLines.set(part.sessionID, lines)
+          statusRunning.delete(part.sessionID)
+        } else {
+          continue
+        }
+        const running = statusRunning.get(part.sessionID)
+        const text = "🎬 working...\n" + [...lines.slice(-8), ...(running ? [running] : [])].join("\n")
         await handle.update(text).catch(() => {})
+      }
+          if (sig.aborted) break
+          log("engine", "event stream ended — reconnecting")
+        } catch (e: any) {
+          if (sig.aborted) break
+          log("engine", `event stream error: ${e?.message ?? e} — reconnecting`)
+        }
+        // We were blind while the stream was down — bump active sessions so the
+        // stall watcher never mistakes blind time for model inactivity.
+        for (const k of statusHandles.keys()) lastActivity.set(k, Date.now())
+        attempt++
+        await new Promise((r) => setTimeout(r, Math.min(15_000, 1_000 * attempt)))
       }
     })()
   }
@@ -1063,7 +1103,17 @@ export async function createEngine(config: GatewayConfig): Promise<{
     parts: any[],
     model: { providerID: string; modelID: string } | undefined,
     variantOverride?: string,
+    opts?: {
+      // Only the AUTO/MIX router may substitute models. When the user PINNED a
+      // model, it must be THE model that answers — on trouble we inform, never
+      // impersonate with the free fallback.
+      allowFallback?: boolean
+      // Called periodically (pinned mode) while the model produces no output, so
+      // the user knows we're still waiting rather than frozen.
+      onStallNotice?: (idleSeconds: number) => void
+    },
   ): Promise<{ result: any; fellBackTo?: string; hardError?: string; skippedDead?: boolean }> => {
+    const allowFallback = opts?.allowFallback ?? true
     const run = (m?: { providerID: string; modelID: string }) => {
       const body: any = { parts, agent: agentForMode(sessionId) }
       if (m) body.model = m
@@ -1080,10 +1130,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
     const isPinnedPaid =
       !!model && (!fb || model.providerID !== fb.providerID || model.modelID !== fb.modelID)
 
-    // The pinned model failed repeatedly very recently (quota/credits/rate-limit/
+    // The routed model failed repeatedly very recently (quota/credits/rate-limit/
     // timeout) → don't burn the timeout on it again. Go straight to the free
-    // fallback and tell the caller we skipped a dead model.
-    if (model && isPinnedPaid && isModelDead(model)) {
+    // fallback and tell the caller we skipped a dead model. AUTO/MIX only — a
+    // user-pinned model is always honored and retried.
+    if (model && isPinnedPaid && allowFallback && isModelDead(model)) {
       log("engine", `skipping recently-dead ${mkey(model)} — falling back directly`)
       if (fb) {
         const retry = await run(fb)
@@ -1092,11 +1143,14 @@ export async function createEngine(config: GatewayConfig): Promise<{
       }
     }
 
-    // A pinned model with no credits/quota doesn't fail fast — the SDK retries
-    // the error with NO output, which would freeze the bot. But a slow model that
-    // IS working streams output the whole time. So abort only on INACTIVITY: if
-    // the model produces no output for STALL_MS, it's truly stuck → fall back. A
-    // long task that keeps streaming is never aborted. (HARD_CEIL is a last resort.)
+    // A model with no credits/quota doesn't fail fast — the SDK retries the error
+    // with NO output, which would freeze the bot. But a slow model that IS working
+    // streams output the whole time (tools/reasoning/text), which keeps
+    // lastActivity fresh via the event stream. Two regimes on true inactivity:
+    //  - AUTO/MIX (allowFallback): no output for STALL_MS → abort & fall back
+    //    (the router's job is to keep the show going).
+    //  - PINNED: NEVER substitute. Notify the user we're still waiting every
+    //    STALL_MS of silence; only give up at HARD_CEIL_MS with a clear error.
     const STALL_MS = 60_000
     const HARD_CEIL_MS = 15 * 60_000
     const runFirst = async () => {
@@ -1105,18 +1159,30 @@ export async function createEngine(config: GatewayConfig): Promise<{
       lastActivity.set(sessionId, started) // reset so an old stamp can't insta-abort
       const TIMEOUT = Symbol("timeout")
       let timer: ReturnType<typeof setInterval> | undefined
+      let lastNotice = started
       const stallWatch = new Promise<typeof TIMEOUT>((res) => {
         timer = setInterval(() => {
-          const idle = Date.now() - (lastActivity.get(sessionId) ?? started)
-          if (idle > STALL_MS || Date.now() - started > HARD_CEIL_MS) res(TIMEOUT)
+          const now = Date.now()
+          const idle = now - (lastActivity.get(sessionId) ?? started)
+          if (now - started > HARD_CEIL_MS) return res(TIMEOUT)
+          if (allowFallback) {
+            if (idle > STALL_MS) res(TIMEOUT)
+            return
+          }
+          // Pinned: keep waiting, but tell the user the model is silent.
+          if (idle > STALL_MS && now - lastNotice > STALL_MS) {
+            lastNotice = now
+            opts?.onStallNotice?.(Math.round(idle / 1000))
+          }
         }, 5000)
       })
       const raced = await Promise.race([run(model), stallWatch])
       if (timer) clearInterval(timer)
       if (raced === TIMEOUT) {
-        log("engine", `model ${mkey(model!)} produced no output for >${STALL_MS / 1000}s — aborting & falling back`)
+        const why = allowFallback ? "aborting & falling back" : "giving up (pinned — no substitution)"
+        log("engine", `model ${mkey(model!)} produced no output — ${why}`)
         await opencode.client.session.abort({ path: { id: sessionId } }).catch(() => {})
-        return { error: new Error("model stalled (no output)"), data: undefined }
+        return { error: new Error(`model produced no output (waited ${Math.round((Date.now() - started) / 1000)}s)`), data: undefined }
       }
       return raced
     }
@@ -1126,9 +1192,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
       noteModelSuccess(model)
       return { result }
     }
-    noteModelFailure(model) // 2 strikes → marked dead for a cooldown (skipped above)
+    noteModelFailure(model) // 2 strikes → marked dead for a cooldown (auto-skip above)
     const pinnedErr = errorTextOf(result)
-    if (!fb || !isPinnedPaid) return { result, hardError: isHardLimit(pinnedErr) ? pinnedErr : undefined }
+    // Pinned: never answer with a different model — surface the real error instead.
+    if (!fb || !isPinnedPaid || !allowFallback)
+      return { result, hardError: pinnedErr || (result as any)?.error?.message || undefined }
     log("engine", `prompt failed on ${model ? mkey(model) : "?"} — falling back to ${fb.providerID}/${fb.modelID}`)
     const retry = await run(fb)
     if (!promptFailed(retry)) return { result: retry, fellBackTo: `${fb.providerID}/${fb.modelID}` }
@@ -1314,11 +1382,25 @@ export async function createEngine(config: GatewayConfig): Promise<{
     log("engine", `handleMessage: "${msg.text.slice(0, 40)}" model=${pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "auto"} images=${msg.images?.length ?? 0} → prompting...`)
 
     const poller = setInterval(() => { void resolvePending(sessionId, responder) }, 3000)
+    // Substitution policy: only the AUTO/MIX router may swap models. A model the
+    // user pinned via /model is THE model — never impersonated by the fallback.
+    const isRouted = routeKind !== undefined
+    const pinLabel = pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "the model"
     const { result, fellBackTo, hardError, skippedDead } = await promptWithFallback(
       sessionId,
       promptParts,
       pinnedModel,
       autoVariant,
+      {
+        allowFallback: isRouted || !pinnedModel,
+        onStallNotice: (idleSeconds) => {
+          void responder
+            .sendText(
+              `⏳ ${pinLabel} hasn't produced output for ${idleSeconds}s — still waiting (it stays YOUR model; no substitution). Use /stop to cancel or /model to switch.`,
+            )
+            .catch(() => {})
+        },
+      },
     )
     clearInterval(poller)
     log("engine", `handleMessage: prompt returned (fellBackTo=${fellBackTo ?? "no"}, hasData=${!!result.data}, err=${!!(result as any).error})`)
@@ -1326,6 +1408,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
     statusHandles.delete(sessionId)
     statusLines.delete(sessionId)
+    statusRunning.delete(sessionId)
 
     if ((result as any).error || !result.data) {
       console.error("Prompt failed:", (result as any).error, hardError ?? "")
