@@ -15,6 +15,9 @@ export interface VoiceConfig {
   apiUrl?: string
   /** Transcription model; defaults to "whisper-1" — use "whisper-large-v3" on Groq. */
   model?: string
+  /** Spoken language hint (e.g. "pt", "en"). Forcing it beats auto-detect on
+   *  short voice notes, where detection is the main source of garbage output. */
+  language?: string
   /** STT engine: "whisper-local" = free local whisper.cpp (default when present); "api" = cloud. */
   sttEngine?: "whisper-local" | "api"
   /** Path to the whisper.cpp binary (default: bundled ~/.hollycode/whisper/main.exe). */
@@ -45,6 +48,39 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
+// Make agent text SPEAKABLE. Replies are markdown ("**bold**", `code`, bullets,
+// links, emojis) and the TTS used to read the symbols out loud — "sua stock
+// asterisco asterisco está em asterisco por cento". Strip everything that isn't
+// meant to be heard, keep the words. Applied inside BOTH speakers so every voice
+// path (voice replies, /speak, the agent's `say` tool) is covered.
+export function sanitizeForSpeech(text: string): string {
+  let t = text
+  // fenced code blocks are unreadable aloud — summarize their presence
+  t = t.replace(/```[\s\S]*?```/g, " (trecho de código omitido) ")
+  // inline code: keep the content, drop the backticks
+  t = t.replace(/`([^`\n]*)`/g, "$1")
+  // links: [label](url) → label ; bare URLs → "link"
+  t = t.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+  t = t.replace(/https?:\/\/\S+/g, " link ")
+  // markdown emphasis/headers/quotes/bullets/tables — keep words, drop markers
+  t = t.replace(/[*_~#>|]+/g, " ")
+  // list numbering "1." at line starts reads awkwardly → drop the dot
+  t = t.replace(/^\s*\d+\.\s+/gm, " ")
+  t = t.replace(/^\s*[-•]\s+/gm, " ")
+  // emojis & pictographs (Piper mispronounces or chokes on them)
+  t = t.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}️‍]/gu, " ")
+  // symbols that read badly aloud
+  t = t.replace(/[<>{}\[\]\\^=+]/g, " ")
+  // punctuation runs ("...", "!!", "--") → a single mark; ellipses read as pause
+  t = t.replace(/([!?.,;:])\1+/g, "$1")
+  t = t.replace(/\s*-{2,}\s*/g, ", ")
+  // collapse whitespace/newlines into natural sentence flow
+  t = t.replace(/\n{2,}/g, ". ").replace(/\n/g, ", ").replace(/\s{2,}/g, " ")
+  // tidy stray commas/periods produced by the stripping
+  t = t.replace(/\s+([,.;:!?])/g, "$1").replace(/([,.])\s*\1+/g, "$1")
+  return t.trim()
+}
+
 // Free, fully-local TTS via the Piper binary (Open Home Foundation). Reads text
 // on stdin, writes a WAV — no API key, works offline. The installer bundles the
 // binary + default voice model under ~/.hollycode/piper.
@@ -54,7 +90,8 @@ function createPiperSpeaker(cfg: VoiceConfig): Speaker {
   const bin = cfg.piperBin || path.join(home, ".hollycode", "piper", process.platform === "win32" ? "piper.exe" : "piper")
   const model = cfg.piperModel || defaultModel
   return {
-    synthesize(text: string): Promise<Uint8Array> {
+    synthesize(rawText: string): Promise<Uint8Array> {
+      const text = sanitizeForSpeech(rawText)
       return new Promise((resolve, reject) => {
         const out = path.join(os.tmpdir(), `holly-tts-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`)
         const piperExe = fs.existsSync(bin) ? bin : "piper" // fall back to PATH
@@ -88,7 +125,8 @@ function createApiSpeaker(cfg: VoiceConfig): Speaker {
   const model = cfg.ttsModel ?? "tts-1"
   const voice = cfg.ttsVoice ?? "alloy"
   return {
-    async synthesize(text: string): Promise<Uint8Array> {
+    async synthesize(rawText: string): Promise<Uint8Array> {
+      const text = sanitizeForSpeech(rawText)
       const res = await fetch(`${base}/audio/speech`, {
         method: "POST",
         headers: { authorization: `Bearer ${cfg.apiKey}`, "content-type": "application/json" },
@@ -140,9 +178,17 @@ function run(bin: string, args: string[]): Promise<void> {
 // .exe broke local STT on macOS/Linux (the bins are "main" and "ffmpeg").
 const EXE = process.platform === "win32" ? ".exe" : ""
 
+// whisper.cpp ≥1.7.4 renamed the CLI main → whisper-cli (main.exe became a
+// deprecation shim that does nothing). Prefer the new name, fall back to the old.
+function defaultWhisperBin(): string {
+  const dir = path.join(os.homedir(), ".hollycode", "whisper")
+  const cli = path.join(dir, `whisper-cli${EXE}`)
+  return fs.existsSync(cli) ? cli : path.join(dir, `main${EXE}`)
+}
+
 function createLocalTranscriber(cfg: VoiceConfig): Transcriber {
   const home = os.homedir()
-  const whisperBin = cfg.whisperBin || path.join(home, ".hollycode", "whisper", `main${EXE}`)
+  const whisperBin = cfg.whisperBin || defaultWhisperBin()
   const whisperModel = cfg.whisperModel || path.join(home, ".hollycode", "whisper", "model.bin")
   const ffmpegBin = cfg.ffmpegBin || path.join(home, ".hollycode", "ffmpeg", `ffmpeg${EXE}`)
   return {
@@ -157,8 +203,12 @@ function createLocalTranscriber(cfg: VoiceConfig): Transcriber {
         await run(ffmpegBin, ["-i", ogg, "-ar", "16000", "-ac", "1", "-y", wav])
         // -t <threads>: whisper.cpp defaults to 4 threads; using the machine's
         // real cores (capped) meaningfully speeds up transcription of each note.
+        // -bs 5: beam search — clearly better accuracy, and with the model-load
+        // time dominating each run it's essentially free.
+        // -l: forcing the configured language beats auto-detect on short notes.
         const threads = String(Math.min(8, Math.max(1, os.cpus().length)))
-        await run(whisperBin, ["-m", whisperModel, "-f", wav, "-l", "auto", "-otxt", "-nt", "-t", threads, "-of", prefix])
+        const lang = cfg.language || "auto"
+        await run(whisperBin, ["-m", whisperModel, "-f", wav, "-l", lang, "-otxt", "-nt", "-bs", "5", "-t", threads, "-of", prefix])
         const text = fs.readFileSync(txt, "utf8").trim()
         return text
       } finally {
@@ -171,7 +221,7 @@ function createLocalTranscriber(cfg: VoiceConfig): Transcriber {
 /** Local whisper.cpp is available if its binary + model + ffmpeg are present. */
 export function localSttAvailable(cfg?: VoiceConfig): boolean {
   const home = os.homedir()
-  const wb = cfg?.whisperBin || path.join(home, ".hollycode", "whisper", `main${EXE}`)
+  const wb = cfg?.whisperBin || defaultWhisperBin()
   const wm = cfg?.whisperModel || path.join(home, ".hollycode", "whisper", "model.bin")
   const fb = cfg?.ffmpegBin || path.join(home, ".hollycode", "ffmpeg", `ffmpeg${EXE}`)
   return fs.existsSync(wb) && fs.existsSync(wm) && fs.existsSync(fb)

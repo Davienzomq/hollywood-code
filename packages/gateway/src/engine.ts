@@ -1394,6 +1394,15 @@ export async function createEngine(config: GatewayConfig): Promise<{
     if (!baseText && mediaImages.length) baseText = "(media attached — look at it and respond)"
     let promptText = flavor ? `[Personality: ${flavor}]\n\n${baseText}` : baseText
     if (goal) promptText = `[Goal: ${goal} — keep working until this is fully met; do not stop early.]\n\n${promptText}`
+    // Voice conversation: the reply will be SPOKEN (TTS), so ask the model for
+    // speakable prose at the source — no markdown, no lists, no code blocks, no
+    // symbols — instead of only sanitizing them out afterwards.
+    if ((msg as any).audio) {
+      promptText =
+        `[Voice conversation: your reply will be read aloud by text-to-speech. Answer in natural spoken prose, in the user's language. ` +
+        `Keep it concise and conversational. Do NOT use markdown, asterisks, bullet lists, headings, tables, code blocks, URLs or emojis — ` +
+        `say numbers and percentages in words when natural.]\n\n${promptText}`
+    }
 
     // Build prompt parts; attach media when the active model has vision. Both
     // pinned and auto resolve to a concrete model here, so the check is precise.
@@ -1484,15 +1493,29 @@ export async function createEngine(config: GatewayConfig): Promise<{
           )
           .catch(() => {})
       }
-      await responder.sendText(reply)
-      // Voice loop: speak the reply back when the user sent audio, or always if
-      // /voice is on (free local Piper TTS — no transcription needed for this).
-      if (((msg as any).audio || speakAlways) && speaker && responder.sendVoice) {
+      // Voice conversation: when the USER spoke, the reply is voice-ONLY (no text
+      // wall after a voice note) — text is only the fallback if TTS fails. With
+      // /voice on (speakAlways) for typed messages, keep text + voice (read-along).
+      const voiceCapable = !!speaker && !!responder.sendVoice
+      let voiceOnlyDelivered = false
+      if ((msg as any).audio && voiceCapable) {
         try {
-          const audio = await speaker.synthesize(reply)
-          await responder.sendVoice(audio)
+          const audio = await speaker!.synthesize(reply)
+          await responder.sendVoice!(audio)
+          voiceOnlyDelivered = true
         } catch (err: any) {
-          log("voice", `TTS reply failed: ${err?.message ?? err}`)
+          log("voice", `TTS reply failed (falling back to text): ${err?.message ?? err}`)
+        }
+      }
+      if (!voiceOnlyDelivered) {
+        await responder.sendText(reply)
+        if (speakAlways && voiceCapable) {
+          try {
+            const audio = await speaker!.synthesize(reply)
+            await responder.sendVoice!(audio)
+          } catch (err: any) {
+            log("voice", `TTS reply failed: ${err?.message ?? err}`)
+          }
         }
       }
       // Silent auto-memory curation (background, non-blocking).
