@@ -1017,6 +1017,42 @@ export async function createEngine(config: GatewayConfig): Promise<{
     return { model: freeModel, tier, score } // provider unavailable → free, no mixing
   }
 
+  // Director duo — the orchestration cast: the DIRECTOR/STAR is the BEST model
+  // of the active provider, the STUNT DOUBLE is the SECOND-BEST. Used by the
+  // director-cut pipeline on high-tier tasks in auto mode.
+  const castDuo = async (): Promise<
+    | {
+        best: { providerID: string; modelID: string }
+        second?: { providerID: string; modelID: string }
+        bestVariant?: string
+        secondVariant?: string
+      }
+    | undefined
+  > => {
+    const providerID = config.autoProvider || freeModel?.providerID || "opencode"
+    try {
+      const prov = await opencode.client.config.providers()
+      const providers: any[] = (prov.data as any)?.providers ?? []
+      const p = providers.find((x: any) => x.id === providerID)
+      const tiers = TIER_MODELS[providerID]
+      if (!p?.models || !tiers) return undefined
+      const avail = (names: string[]) => names.filter((n) => p.models[n])
+      const high = avail(tiers.high)
+      const best = high[0]
+      if (!best) return undefined
+      const second = high.find((n) => n !== best) ?? avail(tiers.mid).find((n) => n !== best)
+      const variantsOf = (m: string) => Object.keys(p.models[m]?.variants ?? {})
+      return {
+        best: { providerID, modelID: best },
+        second: second ? { providerID, modelID: second } : undefined,
+        bestVariant: pickEffort(variantsOf(best), "high"),
+        secondVariant: second ? pickEffort(variantsOf(second), "mid") : undefined,
+      }
+    } catch {
+      return undefined
+    }
+  }
+
   // --- Mix model (CROSS-provider) — separate, only when config.model === "mix" -
   // Casts ACROSS providers by tier from config.mixTable (auto-detected when a
   // tier is unset): low → free double, high → best paid model of any provider.
@@ -1356,11 +1392,24 @@ export async function createEngine(config: GatewayConfig): Promise<{
     let autoVariant: string | undefined
     let routeKind: "auto" | "mix" | undefined
     if (config.model === "auto") {
-      const cast = await castForAuto(msg.text)
-      pinnedModel = cast.model
-      autoTier = cast.tier
-      autoVariant = cast.variant
+      // DIRECTOR-FIRST auto mode (user spec): the provider's STRONGEST model at
+      // HIGH effort always fronts the Telegram conversation. The task score no
+      // longer decides WHO answers — it only decides whether the director
+      // delegates the heavy lifting to the stunt double (the director-cut
+      // pipeline below) or just does the task himself. Either way the DIRECTOR
+      // delivers the final reply.
       routeKind = "auto"
+      autoTier = scoreTask(msg.text).tier
+      const duo = await castDuo()
+      if (duo) {
+        pinnedModel = duo.best
+        autoVariant = duo.bestVariant
+      } else {
+        // Provider without a casting table — fall back to the old per-tier cast.
+        const cast = await castForAuto(msg.text)
+        pinnedModel = cast.model
+        autoVariant = cast.variant
+      }
     } else if (config.model === "mix") {
       const cast = await castForMix(msg.text)
       pinnedModel = cast.model
@@ -1428,22 +1477,94 @@ export async function createEngine(config: GatewayConfig): Promise<{
     // user pinned via /model is THE model — never impersonated by the fallback.
     const isRouted = routeKind !== undefined
     const pinLabel = pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "the model"
-    const { result, fellBackTo, hardError, skippedDead } = await promptWithFallback(
-      sessionId,
-      promptParts,
-      pinnedModel,
-      autoVariant,
-      {
-        allowFallback: isRouted || !pinnedModel,
-        onStallNotice: (idleSeconds) => {
-          void responder
-            .sendText(
-              `⏳ ${pinLabel} hasn't produced output for ${idleSeconds}s — still waiting (it stays YOUR model; no substitution). Use /stop to cancel or /model to switch.`,
-            )
-            .catch(() => {})
-        },
+    const promptOpts = {
+      allowFallback: isRouted || !pinnedModel,
+      onStallNotice: (idleSeconds: number) => {
+        void responder
+          .sendText(
+            `⏳ ${pinLabel} hasn't produced output for ${idleSeconds}s — still waiting (it stays YOUR model; no substitution). Use /stop to cancel or /model to switch.`,
+          )
+          .catch(() => {})
       },
-    )
+    }
+
+    let result: any
+    let fellBackTo: string | undefined
+    let hardError: string | undefined
+    let skippedDead: boolean | undefined
+    let directorCut = false
+
+    // 🎬 DIRECTOR-CUT pipeline (auto mode, high-tier tasks): the DIRECTOR (best
+    // model of the provider) plans → the STUNT DOUBLE (second-best) executes →
+    // the STAR (best) verifies and fixes → the DIRECTOR returns for the final
+    // cut: reviews everything, checks quality, validates and delivers the final
+    // answer. All passes share the same session, so each sees the previous work.
+    if (routeKind === "auto" && autoTier === "high") {
+      const duo = await castDuo()
+      if (duo?.second) {
+        const dbl = duo.second
+        directorCut = true
+        log("engine", `director-cut: director/star=${duo.best.modelID} double=${dbl.modelID}`)
+        const passes = [
+          {
+            label: `🎬 Director planning (${duo.best.modelID})…`,
+            model: duo.best,
+            variant: duo.bestVariant,
+            text:
+              `${promptText}\n\n[🎬 DIRECTOR — PLANNING PASS] You are the director (the strongest model). ` +
+              `Produce a concise, concrete plan for the request above: steps, files/areas to touch, risks. Do NOT execute anything yet.`,
+          },
+          {
+            label: `🤸 Stunt double working (${dbl.modelID})…`,
+            model: dbl,
+            variant: duo.secondVariant,
+            text:
+              `[🤸 STUNT DOUBLE — EXECUTION PASS] Execute the director's plan above COMPLETELY. ` +
+              `Do the real work now (use tools as needed) and report what you did.`,
+          },
+          {
+            label: `⭐ Star verifying (${duo.best.modelID})…`,
+            model: duo.best,
+            variant: duo.bestVariant,
+            text:
+              `[⭐ STAR — VERIFICATION PASS] Verify everything the stunt double did against the original request. ` +
+              `Find any problems and FIX them yourself now. Briefly report what you checked and fixed.`,
+          },
+          {
+            label: `🎬 Director final cut (${duo.best.modelID})…`,
+            model: duo.best,
+            variant: duo.bestVariant,
+            text:
+              `[🎬 DIRECTOR — FINAL CUT] Review ALL the work done for this request: completeness, code quality, correctness. ` +
+              `Finish anything missing, then give the FINAL consolidated answer for the user, in the user's language.`,
+          },
+        ]
+        for (let i = 0; i < passes.length; i++) {
+          const p = passes[i]!
+          await statusHandle.update(`🎬 working...\n${p.label}`).catch(() => {})
+          // Pass 1 carries the original attachments (images/frames); later passes
+          // continue in-session and don't need them re-sent.
+          const parts = i === 0 ? [{ type: "text", text: p.text }, ...promptParts.slice(1)] : [{ type: "text", text: p.text }]
+          const r = await promptWithFallback(sessionId, parts, p.model, p.variant, promptOpts)
+          if (r.fellBackTo) fellBackTo = r.fellBackTo
+          if (promptFailed(r.result)) {
+            hardError = r.hardError
+            result = result ?? r.result // keep the last good pass as the reply
+            log("engine", `director-cut: pass ${i + 1} failed — stopping the pipeline here`)
+            break
+          }
+          result = r.result
+        }
+      }
+    }
+
+    if (result === undefined) {
+      const single = await promptWithFallback(sessionId, promptParts, pinnedModel, autoVariant, promptOpts)
+      result = single.result
+      fellBackTo = single.fellBackTo
+      hardError = single.hardError
+      skippedDead = single.skippedDead
+    }
     clearInterval(poller)
     log("engine", `handleMessage: prompt returned (fellBackTo=${fellBackTo ?? "no"}, hasData=${!!result.data}, err=${!!(result as any).error})`)
     await resolvePending(sessionId, responder)
@@ -1479,7 +1600,8 @@ export async function createEngine(config: GatewayConfig): Promise<{
     // record of the turn — so the label reflects what ran, not just what we asked.
     const effortSuffix = info?.variant && info.variant !== "default" ? ` · ${info.variant}` : ""
     const tierSuffix = autoTier ? ` · ${routeKind}:${autoTier}` : ""
-    const modelLabel = info?.modelID ? `🎬 ${info.providerID}/${info.modelID}${effortSuffix}${tierSuffix}` : "🎬 done"
+    const cutSuffix = directorCut ? " · 🎬 director-cut" : ""
+    const modelLabel = info?.modelID ? `🎬 ${info.providerID}/${info.modelID}${effortSuffix}${tierSuffix}${cutSuffix}` : "🎬 done"
 
     if (reply) {
       await statusHandle.finalize(modelLabel).catch(() => {})
@@ -1735,8 +1857,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
             "/model — show or change model (/model auto = router)\n/cost — savings report\n/undo — undo last\n/fork — fork session\n/rename — rename session\n" +
             "/compact — compact session\n/export — export transcript\n/copy — copy transcript\n/agents — list agents\n" +
             "/skills — list skills\n/init — init with AGENTS.md\n/share — share session\n/review — review changes\n" +
-            "/move — change project dir\n/thinking — toggle thinking\n/remote — connection status\n" +
+            "/move — change project dir\n/remote — connection status\n" +
+            "/mode <ask|auto-edit|plan|bypass|auto> — permission mode\n" +
             "/autoallow — on: approve everything · off: ask here\n" +
+            "/effort · /thinking — reasoning effort for the pinned model\n" +
+            "/mix — cross-provider auto-router (on|off|set tiers)\n" +
+            "/autocompact <50-99>|on|off — auto-compact threshold\n" +
             "/schedule <cron> | <prompt> — run a task on a schedule\n/jobs — list scheduled · /unschedule <id>\n" +
             "/recall <keywords> — search past sessions\n/remember <fact> — save to AGENTS.md memory\n" +
             "/automemory on|off — agent curates memory automatically\n" +
@@ -1776,7 +1902,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
         const m = s?.data ? `${(s.data as any).title} (${sid.slice(0, 12)}…)` : sid
         const modelLine =
           config.model === "auto"
-            ? `🎬 auto (within ${config.autoProvider ?? "free provider"})`
+            ? `🎬 auto — director-first (strongest of ${config.autoProvider ?? "free provider"}, high effort)`
             : config.model === "mix"
               ? "🎚️ mix (cross-provider)"
               : defaultModel
@@ -1807,12 +1933,16 @@ export async function createEngine(config: GatewayConfig): Promise<{
       case "fork": {
         if (!sid) { await responder.sendText("No active session."); break }
         const name = args || `Fork of ${sid.slice(0, 8)}`
-        const f = await opencode.client.session.fork({ path: { id: sid }, body: { title: name } as any }).catch(() => null)
+        // Fork's body only accepts {messageID} — a title there was silently
+        // discarded. Fork first, then apply the name via session.update.
+        const f = await opencode.client.session.fork({ path: { id: sid }, body: {} as any }).catch(() => null)
         if (!f?.data) { await responder.sendText("⚠️ Fork failed."); break }
+        const newID = (f.data as any).id
+        await opencode.client.session.update({ path: { id: newID }, body: { title: name } as any }).catch(() => {})
         const key = sessionKey(channelId, conversationId)
-        sessionMap.set(key, (f.data as any).id)
+        sessionMap.set(key, newID)
         saveStore()
-        await responder.sendText(`🔀 Forked. New session: ${(f.data as any).id}`)
+        await responder.sendText(`🔀 Forked into "${name}" — you're now on the new session.`)
         break
       }
 
@@ -2137,7 +2267,8 @@ export async function createEngine(config: GatewayConfig): Promise<{
         const list = await opencodeV2.v2.agent.list({}).catch(() => null)
         const agents: any[] = (list?.data as any)?.data
         if (!agents?.length) { await responder.sendText("No agents available."); break }
-        const rows = agents.map((a: any) => `${a.id} — ${a.name || a.id}`)
+        // AgentV2Info has no .name — use .description (printing "build — build" before).
+        const rows = agents.map((a: any) => (a.description ? `${a.id} — ${a.description}` : String(a.id)))
         await responder.sendText(`🧠 Agents:\n${rows.join("\n")}`)
         break
       }
@@ -2156,8 +2287,20 @@ export async function createEngine(config: GatewayConfig): Promise<{
       // --- init / share / review ---
       case "init": {
         if (!sid) { await responder.sendText("No active session."); break }
-        await opencode.client.session.init({ path: { id: sid }, body: { directory: DIRECTORY } as any }).catch(() => {})
-        await responder.sendText("📝 Session initialized with AGENTS.md.")
+        // The route requires {modelID, providerID, messageID} — the old call sent
+        // {directory} (not a body field), 400'd silently and lied "initialized".
+        const initModel = defaultModel ?? freeModel
+        if (!initModel) { await responder.sendText("⚠️ Pin a model first with /model, then /init."); break }
+        const initMsgID = `msg_${Date.now().toString(16)}${Math.random().toString(36).slice(2, 12)}`
+        await responder.sendText("📝 Analyzing the project and generating AGENTS.md…")
+        const initOk = await opencode.client.session
+          .init({
+            path: { id: sid },
+            body: { providerID: initModel.providerID, modelID: initModel.modelID, messageID: initMsgID } as any,
+          })
+          .then((r: any) => !r?.error)
+          .catch(() => false)
+        await responder.sendText(initOk ? "✅ AGENTS.md created — the project is initialized." : "⚠️ Init failed — try again or check the model with /model.")
         break
       }
 
@@ -2175,9 +2318,19 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
       case "review": {
         if (!sid) { await responder.sendText("No active session."); break }
+        // The diff endpoint returns Array<FileDiff{file,before,after,additions,
+        // deletions}> — the old code read a nonexistent .diff and dumped raw JSON
+        // (and printed "[]" for zero changes, since an empty array is truthy).
         const diff = await opencode.client.session.diff({ path: { id: sid } }).catch(() => null)
-        if (!diff?.data) { await responder.sendText("No changes to review."); break }
-        await responder.sendText((diff.data as any).diff || JSON.stringify(diff.data, null, 2))
+        const files: any[] = Array.isArray(diff?.data) ? (diff!.data as any[]) : []
+        if (!files.length) { await responder.sendText("✅ No changes to review."); break }
+        const totalAdd = files.reduce((n, f) => n + (f.additions ?? 0), 0)
+        const totalDel = files.reduce((n, f) => n + (f.deletions ?? 0), 0)
+        const rows = files.slice(0, 30).map((f) => `📄 ${f.file}  (+${f.additions ?? 0} −${f.deletions ?? 0})`)
+        const more = files.length > 30 ? `\n…and ${files.length - 30} more files` : ""
+        await responder.sendText(
+          `🔍 Changes in this session — ${files.length} file(s), +${totalAdd} −${totalDel}\n\n${rows.join("\n")}${more}\n\nUse /export for full contents.`,
+        )
         break
       }
 
@@ -2197,8 +2350,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
         break
       }
 
-      // --- variants ---
-      // --- effort / variants (reasoning effort = model variant) ---
+      // --- effort / variants / thinking (reasoning effort = model variant) ---
+      // /thinking used to write a `thinking` field that doesn't exist anywhere in
+      // the API (decorative since day one) — it now IS the real feature: the
+      // model's reasoning-effort variant.
+      case "thinking":
       case "effort":
       case "variants": {
         const curModel = defaultModel
@@ -2274,10 +2430,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
           break
         }
         if (orgs.length === 1) {
-          await responder.sendText(`ℹ️ Only one organization available: ${orgs[0]?.name ?? orgs[0]?.orgID ?? orgs[0]?.id}. Nothing to switch.`)
+          await responder.sendText(`ℹ️ Only one organization available: ${orgs[0]?.orgName ?? orgs[0]?.orgID ?? "(unknown)"}. Nothing to switch.`)
           break
         }
-        const options = orgs.map((o: any) => String(o.name ?? o.orgID ?? o.id ?? "(unknown)"))
+        // The real field is orgName (there is no .name/.id) — the picker was
+        // showing raw UUIDs instead of the human-readable names.
+        const options = orgs.map((o: any) => String(o.orgName ?? o.orgID ?? "(unknown)"))
         const chosen = await responder.askQuestion({ question: "🏢 Pick an organization:", options })
         if (!chosen) break // timed out / cancelled
         const idx = options.indexOf(chosen)
@@ -2378,9 +2536,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
             fs.writeFileSync(p, JSON.stringify(raw, null, 2))
           } catch { /* best-effort */ }
           await responder.sendText(
-            `🎬 AUTO mode — the router casts each message within ${config.autoProvider ?? "your provider"}:\n` +
-              "easy chat → smaller model + low effort, hard tasks → bigger model + high effort.\n" +
-              "Each reply is labeled with the model + tier that played.\n" +
+            `🎬 AUTO mode — DIRECTOR-FIRST in ${config.autoProvider ?? "your provider"}:\n` +
+              "the provider's strongest model (high effort) always talks to you. On heavy tasks it " +
+              "dispatches the stunt double (second-best) to execute, the star verifies, and the " +
+              "director gives you the final cut. Every reply is labeled with what played.\n" +
               "Pin again anytime with /model providerID/modelID",
           )
           break
@@ -2450,7 +2609,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
             fs.writeFileSync(p, JSON.stringify(raw, null, 2))
           } catch { /* best-effort */ }
           await responder.sendText(
-            `🎬 AUTO mode — the router casts each message within ${config.autoProvider ?? "your provider"} (smaller model for easy, bigger for hard).`,
+            `🎬 AUTO mode — DIRECTOR-FIRST: the strongest model of ${config.autoProvider ?? "your provider"} (high effort) always answers; heavy tasks run the director→double→star pipeline.`,
           )
           break
         }
@@ -2476,20 +2635,6 @@ export async function createEngine(config: GatewayConfig): Promise<{
         syncModelToFile(chosen)
         await responder.sendText(`✅ Model set to ${chosen}`)
         log("engine", `/model: set to ${chosen}`)
-        break
-      }
-
-      // --- thinking ---
-      case "thinking": {
-        if (!sid) { await responder.sendText("No active session."); break }
-        if (args) {
-          await opencode.client.session.update({ path: { id: sid }, body: { thinking: args } as any }).catch(() => {})
-          await responder.sendText(`🧠 Thinking set to: ${args}`)
-          break
-        }
-        const s = await opencode.client.session.get({ path: { id: sid } }).catch(() => null)
-        const current = (s?.data as any)?.thinking || "default"
-        await responder.sendText(`🧠 Current thinking: ${current}\nUsage: /thinking on|off|auto`)
         break
       }
 
@@ -3100,12 +3245,19 @@ export async function createEngine(config: GatewayConfig): Promise<{
         // Clear any existing loop for this conversation.
         const oldInterval = loopMap.get(key)
         if (oldInterval) { clearInterval(oldInterval); loopMap.delete(key) }
+        // Overlap guard: a prompt slower than the interval used to stack
+        // concurrent runs against the same session. Skip ticks while running.
+        let loopBusy = false
         const handle = setInterval(async () => {
+          if (loopBusy) { log("loop", `tick skipped for ${key} — previous run still in flight`); return }
+          loopBusy = true
           try {
             const out = await runPrompt(channelId, conversationId, loopPrompt)
             if (deliver) await deliver(channelId, conversationId, out)
           } catch (err: any) {
             log("loop", `Error in loop for ${key}: ${err?.message ?? err}`)
+          } finally {
+            loopBusy = false
           }
         }, seconds * 1000)
         loopMap.set(key, handle)

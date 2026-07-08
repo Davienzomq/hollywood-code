@@ -326,7 +326,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
         { command: "share", description: "Share session" },
         { command: "review", description: "Review changes" },
         { command: "move", description: "Change project dir" },
-        { command: "thinking", description: "Toggle thinking" },
+        { command: "thinking", description: "Reasoning effort (alias of /effort)" },
         { command: "autoallow", description: "Auto-approve on/off" },
         { command: "remote", description: "Connection status" },
         { command: "schedule", description: "Schedule a task (cron)" },
