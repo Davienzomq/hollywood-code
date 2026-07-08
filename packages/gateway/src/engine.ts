@@ -92,6 +92,9 @@ export async function createEngine(config: GatewayConfig): Promise<{
   setScheduler: (s: SchedulerHandle) => void
   setDeliver: (d: (channelId: string, conversationId: string, text: string) => Promise<void>) => void
   setDeliverVoice: (d: (channelId: string, conversationId: string, audio: Uint8Array) => Promise<void>) => void
+  setDeliverImage: (
+    d: (channelId: string, conversationId: string, data: Uint8Array, filename: string, caption?: string) => Promise<void>,
+  ) => void
 }> {
   let DIRECTORY = config.directory || process.cwd()
 
@@ -111,6 +114,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
   let deliver: ((channelId: string, conversationId: string, text: string) => Promise<void>) | undefined
   // Injected by the gateway: deliver voice/audio to a chat (used by the say/TTS tool).
   let deliverVoice: ((channelId: string, conversationId: string, audio: Uint8Array) => Promise<void>) | undefined
+  // Injected by the gateway: deliver an inline image (used by the send_image tool).
+  let deliverImage:
+    | ((channelId: string, conversationId: string, data: Uint8Array, filename: string, caption?: string) => Promise<void>)
+    | undefined
 
   // /debug — verbose logging toggle.
   let verbose = config.debug ?? false
@@ -801,6 +808,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
         chatForSession,
         deliver,
         deliverVoice,
+        deliverImage,
         speak: speaker ? (t: string) => speaker!.synthesize(t) : undefined,
         log,
       })
@@ -2001,6 +2009,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
             "/voice on|off — speak replies aloud (free local Piper)\n" +
             "/profile — what I've learned about you\n/curate — archive unused auto-skills\n" +
             "/tools — enable/disable native tools (browser, …)\n" +
+            "/image <path> — send a local image to this chat (agent can too, via its send_image tool)\n" +
             "/unshare — stop sharing the active session\n" +
             "/redo — redo a previously undone revert\n" +
             "/variants — switch model variant (picker)\n" +
@@ -2462,6 +2471,22 @@ export async function createEngine(config: GatewayConfig): Promise<{
         await responder.sendText(
           `🔍 Changes in this session — ${files.length} file(s), +${totalAdd} −${totalDel}\n\n${rows.join("\n")}${more}\n\nUse /export for full contents.`,
         )
+        break
+      }
+
+      // --- image (send a local image file to this chat, inline) ---
+      case "image": {
+        const p = args.trim().replace(/^["']|["']$/g, "")
+        if (!p) { await responder.sendText("Usage: /image <absolute path to .png/.jpg/.gif/.webp>"); break }
+        if (!responder.sendImage) { await responder.sendText("⚠️ This channel can't display images."); break }
+        if (!/\.(png|jpe?g|gif|webp)$/i.test(p)) { await responder.sendText("Only .png/.jpg/.jpeg/.gif/.webp files."); break }
+        try {
+          const stat = fs.statSync(p)
+          if (stat.size > 10 * 1024 * 1024) { await responder.sendText("⚠️ Larger than Telegram's 10MB photo limit."); break }
+          await responder.sendImage(fs.readFileSync(p), path.basename(p), `📸 ${path.basename(p)}`)
+        } catch {
+          await responder.sendText(`⚠️ Could not read: ${p}`)
+        }
         break
       }
 
@@ -3523,5 +3548,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
     deliverVoice = d
   }
 
-  return { context, stop, runPrompt, setScheduler, setDeliver, setDeliverVoice }
+  const setDeliverImage = (
+    d: (channelId: string, conversationId: string, data: Uint8Array, filename: string, caption?: string) => Promise<void>,
+  ) => {
+    deliverImage = d
+  }
+
+  return { context, stop, runPrompt, setScheduler, setDeliver, setDeliverVoice, setDeliverImage }
 }

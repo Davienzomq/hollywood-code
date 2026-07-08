@@ -71,10 +71,22 @@ export async function startGateway(config: GatewayConfig) {
     if (adapter?.deliverVoice) await adapter.deliverVoice(conversationId, audio)
     else engine.context.log("deliver", `channel ${channelId} can't deliver voice`)
   }
+  const deliverImage = async (
+    channelId: string,
+    conversationId: string,
+    data: Uint8Array,
+    filename: string,
+    caption?: string,
+  ) => {
+    const adapter = byId.get(channelId)
+    if (adapter?.deliverImage) await adapter.deliverImage(conversationId, data, filename, caption)
+    else engine.context.log("deliver", `channel ${channelId} can't deliver images`)
+  }
   const scheduler = createScheduler({ runPrompt: engine.runPrompt, deliver, log: engine.context.log })
   engine.setScheduler(scheduler)
   engine.setDeliver(deliver) // used by the agent send_message tool
   engine.setDeliverVoice(deliverVoice) // used by the agent say/TTS tool
+  engine.setDeliverImage(deliverImage) // used by the agent send_image tool
   scheduler.start()
 
   const shutdown = () => {

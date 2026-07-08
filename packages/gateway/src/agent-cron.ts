@@ -242,12 +242,49 @@ async function __bridge(kind: string, payload: any, ctx: any) {
 }
 `
 
+const SEND_IMAGE_SOURCE = `import fs from "node:fs"
+import path from "node:path"
+import os from "node:os"
+import crypto from "node:crypto"
+
+const BASE = path.join(os.homedir(), ".config", "hollywood", "agent-cron")
+
+export default {
+  description:
+    "Send an IMAGE FILE to the user in this chat so they can view it inline (charts, screenshots, generated images, report figures). Give the absolute path of a local image file (.png/.jpg/.jpeg/.gif/.webp). Use whenever you produce or find an image the user should SEE — no need to email it.",
+  args: {
+    path: { type: "string", description: "Absolute path to the image file on disk." },
+    caption: { type: "string", description: "Optional short caption shown under the image." },
+  },
+  async execute(args: any, ctx: any) {
+    return await __bridge("send_image", { path: String(args.path || ""), caption: String(args.caption || "") }, ctx)
+  },
+}
+
+async function __bridge(kind: string, payload: any, ctx: any) {
+  const id = crypto.randomUUID()
+  const inDir = path.join(BASE, "in"), outDir = path.join(BASE, "out")
+  fs.mkdirSync(inDir, { recursive: true }); fs.mkdirSync(outDir, { recursive: true })
+  try { const a = path.join(BASE, "gateway.alive"); if (!fs.existsSync(a) || Date.now() - fs.statSync(a).mtimeMs > 8000) return "This tool works through Hollycode's remote-control gateway (e.g. Telegram), not in the plain terminal here." } catch {}
+  fs.writeFileSync(path.join(inDir, id + ".json"), JSON.stringify({ id, kind, sessionID: ctx && ctx.sessionID ? ctx.sessionID : "", ...payload }))
+  const outPath = path.join(outDir, id + ".json")
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 400))
+    if (fs.existsSync(outPath)) {
+      try { const res = JSON.parse(fs.readFileSync(outPath, "utf8")); try { fs.unlinkSync(outPath) } catch {} ; return (res.ok ? "OK: " : "Error: ") + res.message } catch { break }
+    }
+  }
+  return "Image request was queued (no confirmation yet)."
+}
+`
+
 const TOOL_SOURCES: Record<string, string> = {
   "cronjob.ts": CRONJOB_SOURCE,
   "recall.ts": RECALL_SOURCE,
   "send_message.ts": SEND_MESSAGE_SOURCE,
   "memory.ts": MEMORY_SOURCE,
   "say.ts": SAY_SOURCE,
+  "send_image.ts": SEND_IMAGE_SOURCE,
 }
 
 /** Install all agent-facing tools into opencode's global tool dir. */
@@ -271,6 +308,9 @@ export interface AgentInboxDeps {
   chatForSession: (sid: string) => { channelId: string; conversationId: string } | undefined
   deliver: ((channelId: string, conversationId: string, text: string) => Promise<void>) | undefined
   deliverVoice: ((channelId: string, conversationId: string, audio: Uint8Array) => Promise<void>) | undefined
+  deliverImage:
+    | ((channelId: string, conversationId: string, data: Uint8Array, filename: string, caption?: string) => Promise<void>)
+    | undefined
   speak: ((text: string) => Promise<Uint8Array>) | undefined
   log: (scope: string, message: string) => void
 }
@@ -348,6 +388,27 @@ async function handleRequest(req: AgentRequest, deps: AgentInboxDeps, respond: (
       if (!text) { respond(false, "Nothing to send (empty text)."); return }
       await deps.deliver(chat.channelId, chat.conversationId, text)
       respond(true, "Message sent.")
+      return
+    }
+
+    if (kind === "send_image") {
+      const chat = deps.chatForSession(req.sessionID)
+      if (!chat) { respond(false, "Could not resolve which chat to send the image to."); return }
+      if (!deps.deliverImage) { respond(false, "This channel can't deliver images."); return }
+      const p = String((req as any).path || "").trim()
+      if (!p) { respond(false, "An image file path is required."); return }
+      if (!/\.(png|jpe?g|gif|webp)$/i.test(p)) { respond(false, "Only .png/.jpg/.jpeg/.gif/.webp files can be sent as images."); return }
+      let data: Uint8Array
+      try {
+        const stat = fs.statSync(p)
+        if (stat.size > 10 * 1024 * 1024) { respond(false, "Image is larger than Telegram's 10MB photo limit."); return }
+        data = fs.readFileSync(p)
+      } catch {
+        respond(false, `Could not read image file: ${p}`)
+        return
+      }
+      await deps.deliverImage(chat.channelId, chat.conversationId, data, path.basename(p), (req as any).caption || undefined)
+      respond(true, "Image sent to the chat.")
       return
     }
 

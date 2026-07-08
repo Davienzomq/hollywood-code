@@ -226,7 +226,23 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       }
     }
 
-    return { sendText, typing, startStatus, askPermission, askQuestion, sendVoice, sendFile }
+    // Inline-viewable image (photo bubble). Telegram photos cap at 10MB and
+    // certain dimensions — on any rejection, fall back to a document so the
+    // image always arrives somehow.
+    const sendImage = async (data: Uint8Array, filename: string, caption?: string): Promise<void> => {
+      const opts = caption ? { caption: caption.slice(0, 1024) } : undefined
+      try {
+        await bot.api.sendPhoto(chatId, new InputFile(data, filename), opts)
+      } catch {
+        try {
+          await bot.api.sendDocument(chatId, new InputFile(data, filename), opts)
+        } catch (err: any) {
+          await bot.api.sendMessage(chatId, `(image send failed: ${err?.message ?? err})`).catch(() => {})
+        }
+      }
+    }
+
+    return { sendText, typing, startStatus, askPermission, askQuestion, sendVoice, sendFile, sendImage }
   }
 
   // ── ChannelAdapter implementation ─────────────────────────────────────────
@@ -289,7 +305,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       "schedule", "jobs", "unschedule", "recall", "remember", "automemory", "memory",
       "personality", "insights", "compress", "voice", "curate", "profile",
       // Native MCP tools (browser, …)
-      "tools", "mcps",
+      "tools", "mcps", "image",
       // New commands (v2)
       "unshare", "redo", "variants", "autostart", "org",
       // CLI-only stubs — the engine replies "CLI-only" for these
@@ -342,6 +358,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
         { command: "profile", description: "What the agent knows about you" },
         { command: "curate", description: "Archive unused auto-skills" },
         { command: "tools", description: "Enable/disable native tools (browser)" },
+        { command: "image", description: "Send a local image file to this chat" },
         { command: "unshare", description: "Stop sharing the active session" },
         { command: "redo", description: "Redo a previously undone revert" },
         { command: "variants", description: "Switch model variant" },
@@ -601,6 +618,21 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
     }
   }
 
+  // Proactive image delivery (agent send_image tool / cron charts).
+  const deliverImage = async (
+    conversationId: string,
+    data: Uint8Array,
+    filename: string,
+    caption?: string,
+  ): Promise<void> => {
+    const opts = caption ? { caption: caption.slice(0, 1024) } : undefined
+    try {
+      await bot.api.sendPhoto(conversationId, new InputFile(data, filename), opts)
+    } catch {
+      await bot.api.sendDocument(conversationId, new InputFile(data, filename), opts).catch(() => {})
+    }
+  }
+
   return {
     id: "telegram",
     label: "Telegram",
@@ -608,6 +640,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
     stop,
     deliver,
     deliverVoice,
+    deliverImage,
   }
 }
 

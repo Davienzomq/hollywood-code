@@ -69,6 +69,8 @@ export interface Responder {
   sendVoice?(audio: Uint8Array): Promise<void>
   /** Send a file attachment (e.g. a long transcript as .md), if supported. */
   sendFile?(data: Uint8Array, filename: string, caption?: string): Promise<void>
+  /** Send an inline-viewable image (photo), if the channel supports it. */
+  sendImage?(data: Uint8Array, filename: string, caption?: string): Promise<void>
 }
 
 /**
@@ -118,6 +120,8 @@ export interface ChannelAdapter {
   deliver?(conversationId: string, text: string): Promise<void>
   /** Outbound voice/audio to a conversation (used by the say/TTS agent tool). */
   deliverVoice?(conversationId: string, audio: Uint8Array): Promise<void>
+  /** Outbound inline image to a conversation (used by the send_image agent tool). */
+  deliverImage?(conversationId: string, data: Uint8Array, filename: string, caption?: string): Promise<void>
 }
 
 /** Factory: builds an adapter from its per-channel config block. */
