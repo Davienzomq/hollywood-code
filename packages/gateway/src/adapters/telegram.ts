@@ -286,7 +286,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       "export", "copy", "agents", "skills", "init", "share",
       "review", "move", "thinking", "autoallow", "remote", "help", "start",
       // Phase C (cron) + Phase D (learning loop)
-      "schedule", "jobs", "unschedule", "recall", "remember", "automemory",
+      "schedule", "jobs", "unschedule", "recall", "remember", "automemory", "memory",
       "personality", "insights", "compress", "voice", "curate", "profile",
       // Native MCP tools (browser, …)
       "tools", "mcps",
@@ -335,6 +335,7 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
         { command: "recall", description: "Search past sessions" },
         { command: "remember", description: "Save a fact to memory" },
         { command: "automemory", description: "Auto-curate memory on/off" },
+        { command: "memory", description: "Memory status / search / curate" },
         { command: "personality", description: "Set agent personality" },
         { command: "insights", description: "Usage insights" },
         { command: "voice", description: "Speak replies on/off (Piper)" },

@@ -15,6 +15,7 @@ import type { SchedulerHandle } from "./scheduler"
 import { createTranscriber, createSpeaker, localSttAvailable } from "./transcription"
 import { installStartup, removeStartup, startupStatus } from "./startup"
 import { openRecallIndex } from "./search"
+import { openMemoryStore, sectionBullets, removeSection, writeSection } from "./memory"
 import { installAgentTools, processAgentInbox } from "./agent-cron"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -351,6 +352,17 @@ export async function createEngine(config: GatewayConfig): Promise<{
   let autoMemory = config.autoMemory ?? true
   const reviewSessions = new Map<string, string>()
   const recall = openRecallIndex() // FTS5 full-text search over past sessions
+  // Tiered memory: WORKING = a small capped section in AGENTS.md (always in
+  // context); LONG = every fact ever learned, in FTS5, OUT of the context —
+  // injected per message via selective retrieval (ChatGPT-Memories style).
+  const memory = openMemoryStore()
+  const MEM_SCOPE_USER = "user"
+  const WORKING_CAP_PROJECT = 40
+  const WORKING_CAP_USER = 25
+  // Managed sections: everything the auto-memory / /remember / agent memory
+  // tool has been appending. The curator folds them into one lean section.
+  const PROJECT_MEM_HEADERS = ["## Auto-memory", "## Memory", "## Memory (added via /remember)"]
+  const USER_MEM_HEADER = "## About the user"
 
   // Personalities — a system-prompt flavor prepended to prompts when active.
   const PERSONALITIES: Record<string, string> = {
@@ -654,9 +666,95 @@ export async function createEngine(config: GatewayConfig): Promise<{
     if (archived.length) log("curator", `archived ${archived.length} unused skill(s): ${archived.join(", ")}`)
     return archived
   }
+  // --- Memory curator — keeps the WORKING memory small and fresh -------------
+  // Folds every managed AGENTS.md memory section into ONE lean deduplicated
+  // section (≤ cap bullets), archiving EVERYTHING into the long-term store
+  // first (nothing is ever lost — it just leaves the context). The first run
+  // digests the accumulated backlog (hundreds of bullets → dozens).
+  let curatorSession: string | undefined
+  const compressViaLLM = async (bullets: string[], cap: number, flavor: string): Promise<string[] | undefined> => {
+    try {
+      if (!curatorSession) {
+        const created = await opencode.client.session.create({ body: { title: "memory curator" } })
+        if (created.error || !created.data) return undefined
+        curatorSession = created.data.id
+      }
+      const prompt =
+        `You are a memory curator. Below are ${bullets.length} remembered facts (${flavor}). ` +
+        `Rewrite them as AT MOST ${cap} concise bullets: merge duplicates and near-duplicates, keep the most ` +
+        `important, recent and durable facts, and drop obsolete or one-off details. Output ONLY the bullets, ` +
+        `one per line, each starting with "- ". No headers, no commentary.\n\n` +
+        bullets.map((b) => `- ${b}`).join("\n")
+      const res = await opencode.client.session
+        .prompt({ path: { id: curatorSession }, body: { parts: [{ type: "text", text: prompt }] } as any })
+        .catch(() => null)
+      const out = (((res as any)?.data?.parts ?? []) as any[])
+        .filter((p) => p.type === "text")
+        .map((p) => p.text || "")
+        .join("\n")
+      const parsed = out
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.startsWith("- "))
+        .map((l) => l.slice(2).trim())
+        .filter(Boolean)
+      if (parsed.length >= 1 && parsed.length <= cap * 1.5) return parsed.slice(0, cap)
+      return undefined
+    } catch {
+      return undefined
+    }
+  }
+  const curateMemoryFile = async (
+    file: string,
+    headers: string[],
+    keepHeader: string,
+    scope: string,
+    cap: number,
+    flavor: string,
+  ) => {
+    let content = ""
+    try {
+      content = fs.readFileSync(file, "utf8")
+    } catch {
+      return
+    }
+    const all: string[] = []
+    for (const h of headers) all.push(...sectionBullets(content, h))
+    if (!all.length) return
+    for (const b of all) memory.add(scope, b) // archive FIRST — nothing is lost
+    if (all.length <= cap && headers.length === 1) return // already lean
+    const unique = [...new Set(all)]
+    const compressed = (await compressViaLLM(unique, cap, flavor)) ?? unique.slice(-cap)
+    for (const h of headers) content = removeSection(content, h)
+    content = writeSection(content, keepHeader, compressed)
+    fs.writeFileSync(file, content)
+    log("memory", `curated ${flavor}: ${all.length} → ${compressed.length} working bullets (long-term: ${memory.count(scope)})`)
+  }
+  const curateMemory = async () => {
+    await curateMemoryFile(
+      path.join(DIRECTORY, "AGENTS.md"),
+      PROJECT_MEM_HEADERS,
+      "## Auto-memory",
+      DIRECTORY,
+      WORKING_CAP_PROJECT,
+      "project memory",
+    )
+    await curateMemoryFile(
+      path.join(os.homedir(), ".config", "opencode", "AGENTS.md"),
+      [USER_MEM_HEADER],
+      USER_MEM_HEADER,
+      MEM_SCOPE_USER,
+      WORKING_CAP_USER,
+      "user profile",
+    )
+  }
+  // First curation shortly after boot (digests the backlog), then every 6h.
+  const memoryBootTimer = setTimeout(() => void curateMemory(), 90_000)
+
   // Runs every 6h while idle (config.skillCurator !== false).
   const curatorTimer = setInterval(() => {
     if (config.skillCurator !== false) curateSkills()
+    void curateMemory()
   }, 6 * 60 * 60 * 1000)
 
   // --- Session helpers ------------------------------------------------------
@@ -1453,6 +1551,21 @@ export async function createEngine(config: GatewayConfig): Promise<{
         `say numbers and percentages in words when natural.]\n\n${promptText}`
     }
 
+    // Selective long-term memory (ChatGPT-Memories style): the archive lives
+    // OUT of the context; inject only the few facts relevant to THIS message.
+    // Usage bumps feed the curator, so recalled facts stay fresh.
+    if (baseText.length >= 6) {
+      try {
+        const hits = memory.search([DIRECTORY, MEM_SCOPE_USER], baseText, 5)
+        if (hits.length) {
+          memory.touch(hits.map((h) => h.id))
+          promptText = `[Relevant memories]\n${hits.map((h) => `- ${h.text}`).join("\n")}\n\n${promptText}`
+        }
+      } catch {
+        /* retrieval is best-effort */
+      }
+    }
+
     // Build prompt parts; attach media when the active model has vision. Both
     // pinned and auto resolve to a concrete model here, so the check is precise.
     const promptParts: any[] = [{ type: "text", text: promptText }]
@@ -1726,30 +1839,47 @@ export async function createEngine(config: GatewayConfig): Promise<{
       const projM = out.match(/PROJECT:\s*([\s\S]*?)(?=USER:|$)/i)
       const userM = out.match(/USER:\s*([\s\S]*)$/i)
 
-      // Append new bullets under a header in a file, deduped.
-      const appendBullets = (file: string, header: string, bullets: string[], label: string) => {
+      // Append new bullets to the WORKING section (capped) and to the LONG-TERM
+      // store (uncapped — nothing is ever lost, it just leaves the context).
+      const appendBullets = (
+        file: string,
+        header: string,
+        bullets: string[],
+        label: string,
+        scope: string,
+        cap: number,
+      ) => {
         if (!bullets.length) return
         let content = ""
         try { content = fs.readFileSync(file, "utf8") } catch { /* new file */ }
-        if (!content.includes(header)) content = content.trimEnd() + (content.trim() ? "\n\n" : "") + header + "\n"
-        let added = 0
-        for (const b of bullets) {
-          if (!content.includes(b)) { content = content.trimEnd() + `\n- ${b}\n`; added++ }
-        }
-        if (added) {
-          fs.mkdirSync(path.dirname(file), { recursive: true })
-          fs.writeFileSync(file, content)
-          log("memory", `auto-saved ${added} ${label} fact(s)`)
-        }
+        for (const b of bullets) memory.add(scope, b)
+        const existing = sectionBullets(content, header)
+        const fresh = bullets.map((b) => b.trim()).filter((b) => b && !existing.includes(b))
+        if (!fresh.length) return
+        let working = [...existing, ...fresh]
+        if (working.length > cap) working = working.slice(working.length - cap) // rotate: oldest fall off (kept long-term)
+        content = writeSection(content, header, working)
+        fs.mkdirSync(path.dirname(file), { recursive: true })
+        fs.writeFileSync(file, content)
+        log("memory", `auto-saved ${fresh.length} ${label} fact(s) (working ${working.length}/${cap})`)
       }
 
       // Project facts → project AGENTS.md; user profile → global AGENTS.md.
-      appendBullets(path.join(DIRECTORY, "AGENTS.md"), "## Auto-memory", bulletsOf(projM?.[1]), "project")
+      appendBullets(
+        path.join(DIRECTORY, "AGENTS.md"),
+        "## Auto-memory",
+        bulletsOf(projM?.[1]),
+        "project",
+        DIRECTORY,
+        WORKING_CAP_PROJECT,
+      )
       appendBullets(
         path.join(os.homedir(), ".config", "opencode", "AGENTS.md"),
         "## About the user",
         bulletsOf(userM?.[1]),
         "user-profile",
+        MEM_SCOPE_USER,
+        WORKING_CAP_USER,
       )
 
       // Autonomous skill creation: if the task taught a reusable procedure,
@@ -1866,6 +1996,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
             "/schedule <cron> | <prompt> — run a task on a schedule\n/jobs — list scheduled · /unschedule <id>\n" +
             "/recall <keywords> — search past sessions\n/remember <fact> — save to AGENTS.md memory\n" +
             "/automemory on|off — agent curates memory automatically\n" +
+            "/memory — memory status · /memory search <q> · /memory curate\n" +
             "/personality <name> — set agent personality\n/insights [days] — usage insights\n/compress — compact context\n" +
             "/voice on|off — speak replies aloud (free local Piper)\n" +
             "/profile — what I've learned about you\n/curate — archive unused auto-skills\n" +
@@ -2778,6 +2909,40 @@ export async function createEngine(config: GatewayConfig): Promise<{
         break
       }
 
+      case "memory": {
+        const a = args.trim()
+        const readSafe = (f: string) => {
+          try { return fs.readFileSync(f, "utf8") } catch { return "" }
+        }
+        if (a.toLowerCase().startsWith("search ")) {
+          const q = a.slice(7).trim()
+          const hits = memory.search([DIRECTORY, MEM_SCOPE_USER], q, 8)
+          await responder.sendText(
+            hits.length
+              ? `🧠 Long-term memory matches for "${q}":\n${hits.map((h) => `- ${h.text}`).join("\n")}`
+              : `No long-term memories match "${q}".`,
+          )
+          break
+        }
+        if (a.toLowerCase() === "curate") {
+          await responder.sendText("🧠 Curating memory (merging duplicates, archiving overflow)…")
+          await curateMemory()
+        }
+        const projWorking = sectionBullets(readSafe(path.join(DIRECTORY, "AGENTS.md")), "## Auto-memory").length
+        const userWorking = sectionBullets(
+          readSafe(path.join(os.homedir(), ".config", "opencode", "AGENTS.md")),
+          USER_MEM_HEADER,
+        ).length
+        await responder.sendText(
+          `🧠 Memory\n` +
+            `  Working (always in context): project ${projWorking}/${WORKING_CAP_PROJECT} · user ${userWorking}/${WORKING_CAP_USER} bullets\n` +
+            `  Long-term (out of context): ${memory.count(DIRECTORY)} project + ${memory.count(MEM_SCOPE_USER)} user facts\n` +
+            `  Per message: the top-5 relevant long-term facts are injected automatically.\n\n` +
+            `Usage: /memory · /memory search <keywords> · /memory curate`,
+        )
+        break
+      }
+
       case "curate": {
         const archived = curateSkills()
         await responder.sendText(
@@ -2812,6 +2977,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
           }
           content = content.trimEnd() + `\n- ${args}\n`
           fs.writeFileSync(p, content)
+          memory.add(DIRECTORY, args) // long-term too, so retrieval can find it
           await responder.sendText(`🧠 Remembered in AGENTS.md:\n- ${args}`)
         } catch (err: any) {
           await responder.sendText(`⚠️ Could not write memory: ${err?.message ?? err}`)
@@ -3334,7 +3500,9 @@ export async function createEngine(config: GatewayConfig): Promise<{
     // Clear all active /loop intervals.
     for (const handle of loopMap.values()) clearInterval(handle)
     loopMap.clear()
+    clearTimeout(memoryBootTimer)
     recall.close()
+    memory.close()
     eventAbort.abort()
     if (serverProc) {
       serverProc.kill()
