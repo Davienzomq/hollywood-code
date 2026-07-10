@@ -389,6 +389,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
   const lastActivity = new Map<string, number>()
   // sessionID → the tool currently RUNNING (transient last status line).
   const statusRunning = new Map<string, string>()
+  // sessionID → hard provider-limit error text (credits/quota/rate) detected in
+  // the live event stream via "retry" parts. This is the ONLY trigger allowed to
+  // abort a turn early / engage the free fallback — silence never is.
+  const hardLimitHit = new Map<string, string>()
   // Coalesce status edits: Telegram allows ~1 edit/sec per message, and a burst
   // of quick tool completions used to fire an edit per event — 429s and dropped
   // updates. At most one edit per 1.2s per session, with a trailing flush so the
@@ -484,6 +488,15 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
         if (event.type !== "message.part.updated") continue
         const part = event.properties.part as ToolPart
+        // Hard provider-limit errors (credits/quota/rate) surface live as "retry"
+        // parts while the SDK retries in a loop with no output. Stamp them — this
+        // is the ONLY signal that may abort a turn early (a busy tool is silent,
+        // so silence alone must never be treated as failure).
+        if ((part as any).type === "retry") {
+          const errTxt = (part as any).error?.data?.message ?? (part as any).error?.message ?? ""
+          if (errTxt && isHardLimit(String(errTxt))) hardLimitHit.set(part.sessionID, String(errTxt))
+          continue
+        }
         if (part.type !== "tool") continue
         const handle = statusHandles.get(part.sessionID)
         if (!handle) continue
@@ -1283,9 +1296,6 @@ export async function createEngine(config: GatewayConfig): Promise<{
       // model, it must be THE model that answers — on trouble we inform, never
       // impersonate with the free fallback.
       allowFallback?: boolean
-      // Called periodically (pinned mode) while the model produces no output, so
-      // the user knows we're still waiting rather than frozen.
-      onStallNotice?: (idleSeconds: number) => void
     },
   ): Promise<{ result: any; fellBackTo?: string; hardError?: string; skippedDead?: boolean }> => {
     const allowFallback = opts?.allowFallback ?? true
@@ -1318,44 +1328,44 @@ export async function createEngine(config: GatewayConfig): Promise<{
       }
     }
 
-    // A model with no credits/quota doesn't fail fast — the SDK retries the error
-    // with NO output, which would freeze the bot. But a slow model that IS working
-    // streams output the whole time (tools/reasoning/text), which keeps
-    // lastActivity fresh via the event stream. Two regimes on true inactivity:
-    //  - AUTO/MIX (allowFallback): no output for STALL_MS → abort & fall back
-    //    (the router's job is to keep the show going).
-    //  - PINNED: NEVER substitute. Notify the user we're still waiting every
-    //    STALL_MS of silence; only give up at HARD_CEIL_MS with a clear error.
-    const STALL_MS = 60_000
-    const HARD_CEIL_MS = 15 * 60_000
+    // Abort policy (user spec): while the agent is WORKING it is never
+    // interrupted and never spammed with "still waiting" notices. A running tool
+    // emits no events (a 5-minute bash is silent), so silence ≠ stuck — a tool in
+    // flight counts as activity. The ONLY early abort is a detected hard provider
+    // limit (credits/quota/rate, stamped live from "retry" parts by the event
+    // stream); only that may engage the fallback. A generous silent window plus
+    // an absolute ceiling catch true zombies with a clear error — no substitution.
+    const SILENT_MS = 5 * 60_000 // no events AND no tool running for 5min → give up
+    const HARD_CEIL_MS = 60 * 60_000 // absolute ceiling for a single turn
     const runFirst = async () => {
       if (!isPinnedPaid) return run(model)
       const started = Date.now()
       lastActivity.set(sessionId, started) // reset so an old stamp can't insta-abort
+      hardLimitHit.delete(sessionId) // stale stamps from a previous turn don't count
       const TIMEOUT = Symbol("timeout")
+      const HARDSTOP = Symbol("hardstop")
       let timer: ReturnType<typeof setInterval> | undefined
-      let lastNotice = started
-      const stallWatch = new Promise<typeof TIMEOUT>((res) => {
+      const stallWatch = new Promise<typeof TIMEOUT | typeof HARDSTOP>((res) => {
         timer = setInterval(() => {
           const now = Date.now()
+          if (hardLimitHit.has(sessionId)) return res(HARDSTOP)
+          // A tool in flight IS work — keep the activity stamp fresh while it runs.
+          if (statusRunning.has(sessionId)) lastActivity.set(sessionId, now)
           const idle = now - (lastActivity.get(sessionId) ?? started)
           if (now - started > HARD_CEIL_MS) return res(TIMEOUT)
-          if (allowFallback) {
-            if (idle > STALL_MS) res(TIMEOUT)
-            return
-          }
-          // Pinned: keep waiting, but tell the user the model is silent.
-          if (idle > STALL_MS && now - lastNotice > STALL_MS) {
-            lastNotice = now
-            opts?.onStallNotice?.(Math.round(idle / 1000))
-          }
+          if (idle > SILENT_MS) res(TIMEOUT)
         }, 5000)
       })
       const raced = await Promise.race([run(model), stallWatch])
       if (timer) clearInterval(timer)
+      if (raced === HARDSTOP) {
+        const why = hardLimitHit.get(sessionId) || "provider limit reached"
+        log("engine", `model ${mkey(model!)} hit a hard provider limit — aborting (${why.slice(0, 140)})`)
+        await opencode.client.session.abort({ path: { id: sessionId } }).catch(() => {})
+        return { error: new Error(why), data: undefined }
+      }
       if (raced === TIMEOUT) {
-        const why = allowFallback ? "aborting & falling back" : "giving up (pinned — no substitution)"
-        log("engine", `model ${mkey(model!)} produced no output — ${why}`)
+        log("engine", `model ${mkey(model!)} produced no output and ran no tools — giving up after ${Math.round((Date.now() - started) / 1000)}s`)
         await opencode.client.session.abort({ path: { id: sessionId } }).catch(() => {})
         return { error: new Error(`model produced no output (waited ${Math.round((Date.now() - started) / 1000)}s)`), data: undefined }
       }
@@ -1365,14 +1375,22 @@ export async function createEngine(config: GatewayConfig): Promise<{
     const result = await runFirst()
     if (!promptFailed(result)) {
       noteModelSuccess(model)
+      hardLimitHit.delete(sessionId)
       return { result }
     }
-    noteModelFailure(model) // 2 strikes → marked dead for a cooldown (auto-skip above)
-    const pinnedErr = errorTextOf(result)
-    // Pinned: never answer with a different model — surface the real error instead.
-    if (!fb || !isPinnedPaid || !allowFallback)
-      return { result, hardError: pinnedErr || (result as any)?.error?.message || undefined }
-    log("engine", `prompt failed on ${model ? mkey(model) : "?"} — falling back to ${fb.providerID}/${fb.modelID}`)
+    const pinnedErr = errorTextOf(result) || (result as any)?.error?.message || ""
+    const hadHardLimit = isHardLimit(pinnedErr) || hardLimitHit.has(sessionId)
+    hardLimitHit.delete(sessionId)
+    // Dead-marking only on hard limits (persistent conditions worth skipping); a
+    // one-off silent turn must not poison the model for the next messages.
+    if (hadHardLimit) noteModelFailure(model)
+    // Fallback policy (user spec): ONLY a hard provider limit (credits/quota/
+    // rate) engages the free fallback, and only for the AUTO/MIX router. Every
+    // other failure surfaces the real error — a weak model must never quietly
+    // answer a heavy task in the pinned model's place.
+    if (!fb || !isPinnedPaid || !allowFallback || !hadHardLimit)
+      return { result, hardError: pinnedErr || undefined }
+    log("engine", `hard limit on ${model ? mkey(model) : "?"} — falling back to ${fb.providerID}/${fb.modelID}`)
     const retry = await run(fb)
     if (!promptFailed(retry)) return { result: retry, fellBackTo: `${fb.providerID}/${fb.modelID}` }
     // Both failed → surface the most informative hard error so the user knows why.
@@ -1597,17 +1615,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
     // Substitution policy: only the AUTO/MIX router may swap models. A model the
     // user pinned via /model is THE model — never impersonated by the fallback.
     const isRouted = routeKind !== undefined
-    const pinLabel = pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "the model"
-    const promptOpts = {
-      allowFallback: isRouted || !pinnedModel,
-      onStallNotice: (idleSeconds: number) => {
-        void responder
-          .sendText(
-            `⏳ ${pinLabel} hasn't produced output for ${idleSeconds}s — still waiting (it stays YOUR model; no substitution). Use /stop to cancel or /model to switch.`,
-          )
-          .catch(() => {})
-      },
-    }
+    // No progress chatter while the agent works (user spec): the live status
+    // message already shows the tools in flight; extra "still waiting" texts are
+    // noise. The only mid-turn message allowed is a detected hard provider limit,
+    // which promptWithFallback surfaces via hardError/fellBackTo.
+    const promptOpts = { allowFallback: isRouted || !pinnedModel }
 
     let result: any
     let fellBackTo: string | undefined
@@ -1697,6 +1709,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     // Slow-leak hygiene: these grow per turn/session and were never pruned.
     lastActivity.delete(sessionId)
     autoResolved.delete(sessionId)
+    hardLimitHit.delete(sessionId)
 
     if ((result as any).error || !result.data) {
       console.error("Prompt failed:", (result as any).error, hardError ?? "")
@@ -1730,9 +1743,8 @@ export async function createEngine(config: GatewayConfig): Promise<{
         const pin = pinnedModel ? `${pinnedModel.providerID}/${pinnedModel.modelID}` : "your model"
         await responder
           .sendText(
-            `⚠️ ${pin} went quiet (no output for a while — usually out of quota/credits or rate-limited), so I ` +
-              `answered with the free ${fellBackTo}. Long tasks that keep streaming are no longer cut off, so if it ` +
-              `has credits just resend. Switch anytime with /model.`,
+            `⚠️ ${pin} hit a hard usage/credit limit, so this answer came from the free ${fellBackTo}. ` +
+              `When the limit resets (or after adding credits) just resend — or switch with /model.`,
           )
           .catch(() => {})
       }
