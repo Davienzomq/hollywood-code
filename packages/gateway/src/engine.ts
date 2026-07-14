@@ -393,6 +393,17 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // the live event stream via "retry" parts. This is the ONLY trigger allowed to
   // abort a turn early / engage the free fallback — silence never is.
   const hardLimitHit = new Map<string, string>()
+  // sessionID → last raw provider error seen in the stream (any kind). When a
+  // turn dies silently, this is surfaced instead of a generic "went silent" —
+  // so a credit-limit that the SDK retried forever is NAMED to the user.
+  const lastStreamError = new Map<string, string>()
+  // child sessionID → parent sessionID. Subagents (task tool) run in CHILD
+  // sessions; mapping them back lets their tool activity show in the parent's
+  // Telegram status (and counts as activity for the stall watcher).
+  const childToParent = new Map<string, string>()
+  // Children whose cast model was already announced in the parent status (once
+  // per subagent — the user verifies the router dispatched the right double).
+  const childModelAnnounced = new Set<string>()
   // Coalesce status edits: Telegram allows ~1 edit/sec per message, and a burst
   // of quick tool completions used to fire an edit per event — 429s and dropped
   // updates. At most one edit per 1.2s per session, with a trailing flush so the
@@ -445,11 +456,23 @@ export async function createEngine(config: GatewayConfig): Promise<{
           for await (const event of events.stream) {
             if (sig.aborted) break
 
+        // Subagent sessions: session events carry parentID — remember the link
+        // so a child's activity is attributed to the parent conversation.
+        if (event.type === "session.updated" || event.type === "session.created") {
+          const sInfo = (event.properties as any)?.info
+          if (sInfo?.parentID && sInfo?.id) childToParent.set(sInfo.id, sInfo.parentID)
+        }
+
         // Any message event for a session = its model is alive and producing
         // output. Stamp it so the stall watcher won't abort a working long task.
+        // Child activity stamps the PARENT too (subagent working = turn alive).
         const evSid =
           (event.properties as any)?.info?.sessionID ?? (event.properties as any)?.part?.sessionID
-        if (evSid) lastActivity.set(evSid, Date.now())
+        if (evSid) {
+          lastActivity.set(evSid, Date.now())
+          const evParent = childToParent.get(evSid)
+          if (evParent) lastActivity.set(evParent, Date.now())
+        }
 
         // Auto-compaction notice. The engine compacts automatically when the
         // context crosses the configured threshold (default 95%, like Claude
@@ -458,6 +481,31 @@ export async function createEngine(config: GatewayConfig): Promise<{
         // message flagged summary/compaction.
         if (event.type === "message.updated") {
           const info = (event.properties as any).info
+          // Announce WHICH MODEL each subagent runs, once, in the parent status —
+          // so the user can verify the router dispatched the right double.
+          if (info?.role === "assistant" && info.modelID && childToParent.has(info.sessionID)) {
+            const parent0 = childToParent.get(info.sessionID)!
+            if (statusHandles.has(parent0) && !childModelAnnounced.has(info.sessionID)) {
+              childModelAnnounced.add(info.sessionID)
+              const lines0 = statusLines.get(parent0) ?? []
+              const variant0 = info.variant && info.variant !== "default" ? ` · ${info.variant}` : ""
+              lines0.push(`🤖 subagent cast: ${info.providerID}/${info.modelID}${variant0}`)
+              statusLines.set(parent0, lines0)
+              const running0 = statusRunning.get(parent0)
+              pushStatusEdit(parent0, "🎬 working...\n" + [...lines0.slice(-8), ...(running0 ? [running0] : [])].join("\n"))
+            }
+          }
+          // Assistant-message errors carry the REAL provider failure (credits,
+          // quota, auth…). Record it so a silent death can be named, and stamp
+          // hard limits so the watcher aborts + falls back per policy.
+          if (info?.role === "assistant" && info.error) {
+            const errTxt = String(info.error?.data?.message ?? info.error?.message ?? info.error?.name ?? "")
+            if (errTxt) {
+              const owner0 = childToParent.get(info.sessionID) ?? info.sessionID
+              lastStreamError.set(owner0, errTxt)
+              if (isHardLimit(errTxt)) hardLimitHit.set(owner0, errTxt)
+            }
+          }
           const isSummary =
             info &&
             info.role === "assistant" &&
@@ -493,33 +541,42 @@ export async function createEngine(config: GatewayConfig): Promise<{
         // is the ONLY signal that may abort a turn early (a busy tool is silent,
         // so silence alone must never be treated as failure).
         if ((part as any).type === "retry") {
-          const errTxt = (part as any).error?.data?.message ?? (part as any).error?.message ?? ""
-          if (errTxt && isHardLimit(String(errTxt))) hardLimitHit.set(part.sessionID, String(errTxt))
+          const errTxt = String((part as any).error?.data?.message ?? (part as any).error?.message ?? "")
+          if (errTxt) {
+            const owner0 = childToParent.get(part.sessionID) ?? part.sessionID
+            lastStreamError.set(owner0, errTxt)
+            if (isHardLimit(errTxt)) hardLimitHit.set(owner0, errTxt)
+          }
           continue
         }
         if (part.type !== "tool") continue
-        const handle = statusHandles.get(part.sessionID)
+        // Subagent tools render into the PARENT's status, prefixed — so the user
+        // sees what the doubles are doing instead of a frozen "working".
+        const owner = statusHandles.has(part.sessionID) ? part.sessionID : childToParent.get(part.sessionID)
+        if (!owner) continue
+        const handle = statusHandles.get(owner)
         if (!handle) continue
-        const lines = statusLines.get(part.sessionID) ?? []
+        const sub = owner !== part.sessionID ? "↳ 🤖 " : ""
+        const lines = statusLines.get(owner) ?? []
         const st: any = part.state
         if (st.status === "running") {
           // Live line for the tool in flight — long bash/computeruse steps show
           // up immediately instead of only after they complete.
-          statusRunning.set(part.sessionID, `⏳ ${part.tool}${st.title ? ` — ${st.title}` : "…"}`)
+          statusRunning.set(owner, `⏳ ${sub}${part.tool}${st.title ? ` — ${st.title}` : "…"}`)
         } else if (st.status === "completed") {
-          lines.push(`✓ ${part.tool} — ${st.title}`)
-          statusLines.set(part.sessionID, lines)
-          statusRunning.delete(part.sessionID)
+          lines.push(`✓ ${sub}${part.tool} — ${st.title}`)
+          statusLines.set(owner, lines)
+          statusRunning.delete(owner)
         } else if (st.status === "error") {
-          lines.push(`✗ ${part.tool} — ${st.error ?? "error"}`)
-          statusLines.set(part.sessionID, lines)
-          statusRunning.delete(part.sessionID)
+          lines.push(`✗ ${sub}${part.tool} — ${st.error ?? "error"}`)
+          statusLines.set(owner, lines)
+          statusRunning.delete(owner)
         } else {
           continue
         }
-        const running = statusRunning.get(part.sessionID)
+        const running = statusRunning.get(owner)
         const text = "🎬 working...\n" + [...lines.slice(-8), ...(running ? [running] : [])].join("\n")
-        pushStatusEdit(part.sessionID, text)
+        pushStatusEdit(owner, text)
       }
           if (sig.aborted) break
           log("engine", "event stream ended — reconnecting")
@@ -1076,12 +1133,15 @@ export async function createEngine(config: GatewayConfig): Promise<{
   }
 
   // Per-provider casting table: smaller → bigger model by tier. Validated live
-  // against the provider's actual models; unavailable names are skipped.
+  // against the provider's actual models; unavailable names are skipped. This is
+  // only the SAFETY FALLBACK — candidatesFor() below discovers new models
+  // dynamically from the provider's live list, so the router adapts on its own
+  // when a provider ships a new generation (no more being stuck on old models).
   const TIER_MODELS: Record<string, Record<Tier, string[]>> = {
     openai: {
-      low: ["gpt-5.4-mini", "gpt-5-nano", "gpt-5-mini"],
-      mid: ["gpt-5.4", "gpt-5-mini", "gpt-5"],
-      high: ["gpt-5.5", "gpt-5.4-codex", "gpt-5.4", "gpt-5"],
+      low: ["gpt-5.6-luna", "gpt-5.6", "gpt-5.4-mini"],
+      mid: ["gpt-5.6-terra", "gpt-5.6", "gpt-5.4"],
+      high: ["gpt-5.6-sol", "gpt-5.6-pro", "gpt-5.6", "gpt-5.5"],
     },
     anthropic: {
       low: ["claude-haiku-4-5", "claude-3-5-haiku"],
@@ -1098,6 +1158,62 @@ export async function createEngine(config: GatewayConfig): Promise<{
       mid: ["big-pickle", "qwen3-coder", "claude-sonnet-4-6"],
       high: ["claude-fable-5", "claude-opus-4-8", "big-pickle"],
     },
+  }
+  // Newest-first version ordering: "5.6" > "5.4" > "5".
+  const compareModelVersions = (a: string, b: string): number => {
+    const left = a.split(".").map(Number)
+    const right = b.split(".").map(Number)
+    const size = Math.max(left.length, right.length)
+    for (let i = 0; i < size; i++) {
+      const delta = (right[i] ?? 0) - (left[i] ?? 0)
+      if (delta) return delta
+    }
+    return 0
+  }
+  // DYNAMIC tier discovery — one parser per provider family. Maps a live model
+  // id → {tier, version, penalty}; penalty pushes variant builds (-fast/-pro,
+  // date-stamped ids…) behind the canonical one of the same version.
+  const DYNAMIC_FAMILIES: Record<
+    string,
+    (id: string) => { tier: Tier; version: string; penalty: number } | undefined
+  > = {
+    // OpenAI's gpt-5.6 generation renamed the tiers: luna (small) / terra (mid)
+    // / sol (frontier), with optional -fast/-pro builds.
+    openai: (id) => {
+      const m = /^gpt-(\d+(?:\.\d+)*?)-(luna|terra|sol)(?:-(fast|pro))?$/.exec(id)
+      if (!m) return undefined
+      const tier: Tier = m[2] === "luna" ? "low" : m[2] === "terra" ? "mid" : "high"
+      return { tier, version: m[1]!, penalty: m[3] ? 1 : 0 }
+    },
+    // Anthropic: family name IS the tier (haiku/sonnet/opus + fable at the top).
+    anthropic: (id) => {
+      const m = /^claude-(fable|opus|sonnet|haiku)-(\d+(?:[.-]\d+)*)$/.exec(id)
+      if (!m) return undefined
+      const tier: Tier = m[1] === "haiku" ? "low" : m[1] === "sonnet" ? "mid" : "high"
+      const nums = m[2]!.split(/[.-]/)
+      const major = Number(nums[0] ?? 0) + (m[1] === "fable" ? 100 : 0) // fable outranks opus
+      return { tier, version: [String(major), ...nums.slice(1)].join("."), penalty: 0 }
+    },
+    // Google: flash-lite (small) / flash (mid) / pro+ultra (frontier).
+    google: (id) => {
+      const m = /^gemini-(\d+(?:\.\d+)*)-(flash-lite|flash|pro|ultra)$/.exec(id)
+      if (!m) return undefined
+      const tier: Tier = m[2] === "flash-lite" ? "low" : m[2] === "flash" ? "mid" : "high"
+      return { tier, version: m[1]!, penalty: m[2] === "pro" ? 1 : 0 } // ultra beats pro
+    },
+  }
+  const candidatesFor = (providerID: string, tier: Tier, available: string[]): string[] => {
+    const fallback = TIER_MODELS[providerID]?.[tier] ?? []
+    const parse = DYNAMIC_FAMILIES[providerID]
+    if (!parse) return fallback
+    const discovered = available
+      .flatMap((id) => {
+        const d = parse(id)
+        return d && d.tier === tier ? [{ id, version: d.version, penalty: d.penalty }] : []
+      })
+      .sort((a, b) => compareModelVersions(a.version, b.version) || a.penalty - b.penalty)
+      .map((x) => x.id)
+    return [...new Set([...discovered, ...fallback])]
   }
   // Pick a reasoning-effort variant matching the tier from the model's available ones.
   const pickEffort = (keys: string[], tier: Tier): string | undefined => {
@@ -1118,7 +1234,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
       const providers: any[] = (prov.data as any)?.providers ?? []
       const p = providers.find((x: any) => x.id === providerID)
       if (p?.models) {
-        const cands = TIER_MODELS[providerID]?.[tier] ?? []
+        const cands = candidatesFor(providerID, tier, Object.keys(p.models))
         for (const c of cands) {
           if (p.models[c]) {
             const variant = pickEffort(Object.keys(p.models[c]?.variants ?? {}), tier)
@@ -1156,10 +1272,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
       const tiers = TIER_MODELS[providerID]
       if (!p?.models || !tiers) return undefined
       const avail = (names: string[]) => names.filter((n) => p.models[n])
-      const high = avail(tiers.high)
+      const available = Object.keys(p.models)
+      const high = avail(candidatesFor(providerID, "high", available))
       const best = high[0]
       if (!best) return undefined
-      const second = high.find((n) => n !== best) ?? avail(tiers.mid).find((n) => n !== best)
+      const second =
+        high.find((n) => n !== best) ?? avail(candidatesFor(providerID, "mid", available)).find((n) => n !== best)
       const variantsOf = (m: string) => Object.keys(p.models[m]?.variants ?? {})
       return {
         best: { providerID, modelID: best },
@@ -1204,7 +1322,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     }
     const order = [...providers.filter((p: any) => p.id !== "opencode"), ...providers.filter((p: any) => p.id === "opencode")]
     for (const p of order) {
-      for (const c of TIER_MODELS[p.id]?.[tier] ?? []) {
+      for (const c of candidatesFor(p.id, tier, Object.keys(p.models ?? {}))) {
         if (p.models?.[c]) return { model: { providerID: p.id, modelID: c }, variant: variantOf(p.id, c), tier, score }
       }
     }
@@ -1247,7 +1365,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // Hard provider limits that a retry won't fix (out of quota/credits, plan caps,
   // rate limits, bad auth). Used to message the user precisely.
   const isHardLimit = (text: string): boolean =>
-    /usage limit|quota|insufficient|exceeded|rate.?limit|too many requests|\b401\b|\b403\b|\b429\b|unauthor|invalid api key|no credit|out of credit|billing/i.test(
+    /usage limit|limit (reached|exceeded)|quota|insufficient|exceeded|rate.?limit|too many requests|\b40[13]\b|\b402\b|\b429\b|payment required|unauthor|invalid api key|no credit|out of credit|credit balance|balance too low|billing/i.test(
       text || "",
     )
   // A pinned model that keeps failing (quota/credits/rate-limit/timeout) must not
@@ -1279,7 +1397,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     const resetM = (err || "").match(/reset[s]?\b[^.\n]*?\b(in\s+[\w.\s]+?(?:second|minute|hour|day)s?|at\s+[\d:apm.\s]+)/i)
     const reset = resetM ? ` — resets ${resetM[1].trim()}` : ""
     if (/usage limit|plan|quota/.test(low))
-      return `⚠️ *${model}* hit its usage limit (plans like ChatGPT Plus cap the top models)${reset}. Switch with /model — e.g. \`gpt-5.4-mini\` — or wait for the reset.`
+      return `⚠️ *${model}* hit its usage limit (plans like ChatGPT Plus cap the top models)${reset}. Switch with /model — e.g. \`gpt-5.6-luna\` — or wait for the reset.`
     if (/rate.?limit|too many|429/.test(low))
       return `⚠️ *${model}* is rate-limited right now. Try again shortly, or switch with /model.`
     if (/401|403|unauthor|api key|invalid|credit|billing|insufficient/.test(low))
@@ -1342,6 +1460,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
       const started = Date.now()
       lastActivity.set(sessionId, started) // reset so an old stamp can't insta-abort
       hardLimitHit.delete(sessionId) // stale stamps from a previous turn don't count
+      lastStreamError.delete(sessionId)
       const TIMEOUT = Symbol("timeout")
       const HARDSTOP = Symbol("hardstop")
       let timer: ReturnType<typeof setInterval> | undefined
@@ -1365,9 +1484,16 @@ export async function createEngine(config: GatewayConfig): Promise<{
         return { error: new Error(why), data: undefined }
       }
       if (raced === TIMEOUT) {
-        log("engine", `model ${mkey(model!)} produced no output and ran no tools — giving up after ${Math.round((Date.now() - started) / 1000)}s`)
+        // Name the REAL cause when we saw one in the stream (a quota error the
+        // SDK kept retrying looks like silence otherwise) — the user gets
+        // "usage limit" instead of a mysterious "went silent".
+        const seen = lastStreamError.get(sessionId)
+        log("engine", `model ${mkey(model!)} produced no output and ran no tools — giving up after ${Math.round((Date.now() - started) / 1000)}s${seen ? ` (last error: ${seen.slice(0, 120)})` : ""}`)
         await opencode.client.session.abort({ path: { id: sessionId } }).catch(() => {})
-        return { error: new Error(`model produced no output (waited ${Math.round((Date.now() - started) / 1000)}s)`), data: undefined }
+        return {
+          error: new Error(seen || `model produced no output (waited ${Math.round((Date.now() - started) / 1000)}s)`),
+          data: undefined,
+        }
       }
       return raced
     }
@@ -1468,7 +1594,8 @@ export async function createEngine(config: GatewayConfig): Promise<{
       userId: string
       text: string
       images?: Array<{ url: string; mime: string; filename?: string }>
-      videos?: Array<{ path: string; filename?: string }>
+      videos?: Array<{ path: string; filename?: string; temporary?: boolean }>
+      attachments?: Array<{ path: string; filename: string; mime?: string; size?: number }>
     },
     responder: Responder,
   ) => {
@@ -1547,7 +1674,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
     if (msg.videos?.length) {
       for (const v of msg.videos) {
         const frames = await extractVideoFrames(v.path)
-        try { fs.rmSync(v.path, { force: true }) } catch { /* temp cleanup */ }
+        // Persisted attachments (temporary: false) stay on disk for the agent.
+        if (v.temporary !== false) {
+          try { fs.rmSync(v.path, { force: true }) } catch { /* temp cleanup */ }
+        }
         if (frames.length) {
           frames.forEach((url, i) =>
             mediaImages.push({ url, mime: "image/png", filename: `${v.filename ?? "video"}-frame${i + 1}.png` }),
@@ -1565,6 +1695,14 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
     let baseText = msg.text
     if (!baseText && mediaImages.length) baseText = "(media attached — look at it and respond)"
+    // Attachments live on disk — give the agent the absolute paths so it can
+    // copy/move/convert the actual files, not just read them in chat.
+    if (msg.attachments?.length) {
+      const paths = msg.attachments
+        .map((file) => `- ${file.filename}: ${file.path}${file.mime ? ` (${file.mime})` : ""}`)
+        .join("\n")
+      baseText = `${baseText || "(file attached — ask what the user wants done with it)"}\n\n[Local attachment paths]\n${paths}`
+    }
     let promptText = flavor ? `[Personality: ${flavor}]\n\n${baseText}` : baseText
     if (goal) promptText = `[Goal: ${goal} — keep working until this is fully met; do not stop early.]\n\n${promptText}`
     // Voice conversation: the reply will be SPOKEN (TTS), so ask the model for
@@ -1710,6 +1848,13 @@ export async function createEngine(config: GatewayConfig): Promise<{
     lastActivity.delete(sessionId)
     autoResolved.delete(sessionId)
     hardLimitHit.delete(sessionId)
+    lastStreamError.delete(sessionId)
+    for (const [child, parent] of childToParent) {
+      if (parent === sessionId) {
+        childToParent.delete(child)
+        childModelAnnounced.delete(child)
+      }
+    }
 
     if ((result as any).error || !result.data) {
       console.error("Prompt failed:", (result as any).error, hardError ?? "")

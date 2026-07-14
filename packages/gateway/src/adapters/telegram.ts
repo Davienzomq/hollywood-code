@@ -6,6 +6,24 @@ import type { ChannelAdapter, GatewayContext, Responder, StatusHandle, IncomingM
 
 const TELEGRAM_MAX = 4096
 
+// Files received on Telegram are persisted here and exposed to the agent by
+// ABSOLUTE PATH (not only inlined into chat) — so it can copy/move/process them
+// like any local file. Layout: attachments/telegram/<chatId>/<messageId>/<name>.
+const ATTACHMENT_ROOT = path.join(os.homedir(), ".config", "hollywood", "attachments", "telegram")
+
+function safeFilename(name: string): string {
+  const cleaned = path.basename(name).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim()
+  return cleaned || "attachment"
+}
+
+function saveAttachment(chatId: number, messageId: number, filename: string, data: Buffer): string {
+  const dir = path.join(ATTACHMENT_ROOT, String(chatId), String(messageId))
+  fs.mkdirSync(dir, { recursive: true })
+  const target = path.join(dir, safeFilename(filename))
+  fs.writeFileSync(target, data)
+  return target
+}
+
 // ── Lightweight markdown → Telegram HTML ─────────────────────────────────────
 // Agent replies are full of ``` blocks, `code` and **bold** that used to arrive
 // as raw markdown. Convert conservatively PER CHUNK: escape everything first,
@@ -437,7 +455,10 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
           const file = await gramCtx.getFile() // works for voice + audio
           const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`
           const buf = new Uint8Array(await (await fetch(url)).arrayBuffer())
-          const text = await ctx.transcribe!(buf, "voice.ogg")
+          const audioMeta = (gramCtx.message as any)?.audio as { file_name?: string; mime_type?: string } | undefined
+          const filename = safeFilename(audioMeta?.file_name ?? "voice.ogg")
+          const localPath = saveAttachment(chatId, (gramCtx.message as any).message_id, filename, Buffer.from(buf))
+          const text = await ctx.transcribe!(buf, filename)
           if (!text) {
             if (note) await bot.api.editMessageText(chatId, note.message_id, "🎤 Couldn't transcribe that audio.").catch(() => {})
             else await gramCtx.reply("🎤 Couldn't transcribe that audio.").catch(() => {})
@@ -445,7 +466,13 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
           }
           if (note) await bot.api.editMessageText(chatId, note.message_id, `🎤 "${text}"`.slice(0, TELEGRAM_MAX)).catch(() => {})
           else await gramCtx.reply(`🎤 "${text}"`).catch(() => {})
-          const incomingMsg: IncomingMessage = { conversationId: chatId.toString(), userId, text, audio: true }
+          const incomingMsg: IncomingMessage = {
+            conversationId: chatId.toString(),
+            userId,
+            text,
+            audio: true,
+            attachments: [{ path: localPath, filename, mime: audioMeta?.mime_type ?? "audio/ogg", size: buf.length }],
+          }
           const responder = makeResponder(chatId, gramCtx)
           if (text.startsWith("/")) {
             const sp = text.indexOf(" ")
@@ -471,9 +498,8 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       const doc = m?.document as { file_id: string; mime_type?: string; file_name?: string; file_size?: number } | undefined
       const isImageDoc = !!doc && typeof doc.mime_type === "string" && doc.mime_type.startsWith("image/")
 
-      // TEXT documents (PRD.md, .txt, code files…) used to be ignored in total
-      // silence — the user sent a file and nothing happened. Inline them into
-      // the prompt so the agent can read them directly.
+      // TEXT documents are saved locally (so the agent can copy/move/process the
+      // FILE) and small ones are also inlined for immediate reading.
       const TEXT_EXT = /\.(md|txt|json|jsonc|yaml|yml|csv|log|ts|tsx|js|jsx|py|go|rs|java|rb|sh|ps1|css|html|xml|sql|toml|ini|env)$/i
       const isTextDoc =
         !!doc &&
@@ -486,18 +512,25 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
           const userId = gramCtx.from!.id.toString()
           const responder = makeResponder(chatId, gramCtx)
           try {
-            const MAX_TEXT_DOC = 256 * 1024
-            if ((doc!.file_size ?? 0) > MAX_TEXT_DOC) {
-              await responder.sendText(`⚠️ ${doc!.file_name ?? "File"} is too large to inline (max 256 KB). Put it in the project and ask me to read it.`)
-              return
-            }
             const file = await gramCtx.api.getFile(doc!.file_id)
             const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`
-            const content = Buffer.from(await (await fetch(url)).arrayBuffer()).toString("utf8")
+            const buf = Buffer.from(await (await fetch(url)).arrayBuffer())
             const caption: string = m?.caption ?? ""
             const name = doc!.file_name ?? "file.txt"
-            const text = `${caption || `I'm sending you the file ${name} — read it.`}\n\n📎 ${name}:\n\`\`\`\n${content}\n\`\`\``
-            await ctx.handleMessage("telegram", { conversationId: chatId.toString(), userId, text }, responder)
+            const localPath = saveAttachment(chatId, m.message_id, name, buf)
+            const MAX_INLINE = 256 * 1024
+            const inline = buf.length <= MAX_INLINE ? `\n\n📎 ${name}:\n\`\`\`\n${buf.toString("utf8")}\n\`\`\`` : ""
+            const text = `${caption || `I'm sending you the file ${name}${inline ? " — read it" : ""}.`}${inline}`
+            await ctx.handleMessage(
+              "telegram",
+              {
+                conversationId: chatId.toString(),
+                userId,
+                text,
+                attachments: [{ path: localPath, filename: name, mime: doc!.mime_type, size: buf.length }],
+              },
+              responder,
+            )
           } catch (err: any) {
             ctx.log("telegram", `text-doc handling failed: ${err?.message ?? err}`)
             try { await responder.sendText(`⚠️ Couldn't read that file: ${err?.message ?? err}`) } catch { /* ignore */ }
@@ -507,8 +540,36 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
       }
 
       if (!photos?.length && !isImageDoc) {
-        // Unsupported document type — say so instead of dying silently.
-        void gramCtx.reply("📎 I can read images and text files (.md, .txt, code). This file type isn't supported yet.").catch(() => {})
+        // Any OTHER document type (pdf, zip, xlsx, exe…): save it locally and
+        // hand the agent the path — it can move/convert/inspect the file even
+        // when the content can't be inlined as text.
+        if (!doc?.file_id) return
+        void (async () => {
+          const chatId = gramCtx.chat!.id
+          const userId = gramCtx.from!.id.toString()
+          const responder = makeResponder(chatId, gramCtx)
+          try {
+            const file = await gramCtx.api.getFile(doc.file_id)
+            const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`
+            const buf = Buffer.from(await (await fetch(url)).arrayBuffer())
+            const name = doc.file_name ?? "attachment"
+            const localPath = saveAttachment(chatId, m.message_id, name, buf)
+            const caption: string = m?.caption ?? ""
+            await ctx.handleMessage(
+              "telegram",
+              {
+                conversationId: chatId.toString(),
+                userId,
+                text: caption || `I'm sending you the file ${name}. Ask what I want done with it before processing it.`,
+                attachments: [{ path: localPath, filename: name, mime: doc.mime_type, size: buf.length }],
+              },
+              responder,
+            )
+          } catch (err: any) {
+            ctx.log("telegram", `document handling failed: ${err?.message ?? err}`)
+            try { await responder.sendText(`⚠️ Couldn't save that file: ${err?.message ?? err}`) } catch { /* ignore */ }
+          }
+        })()
         return
       }
 
@@ -531,12 +592,16 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
           const file = await gramCtx.api.getFile(fileId)
           const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`
           const buf = Buffer.from(await (await fetch(url)).arrayBuffer())
+          // Persist the image too: vision sees it inline AND the agent can copy/
+          // move the actual file (attachment path goes into the prompt).
+          const localPath = saveAttachment(chatId, m.message_id, filename, buf)
           const dataUrl = `data:${mime};base64,${buf.toString("base64")}`
           const incomingMsg: IncomingMessage = {
             conversationId: chatId.toString(),
             userId,
             text: caption,
             images: [{ url: dataUrl, mime, filename }],
+            attachments: [{ path: localPath, filename, mime, size: buf.length }],
           }
           await ctx.handleMessage("telegram", incomingMsg, responder)
         } catch (err: any) {
@@ -564,14 +629,17 @@ function makeTelegramAdapter(token: string): ChannelAdapter {
           const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`
           const buf = Buffer.from(await (await fetch(url)).arrayBuffer())
           const ext = (vid.file_name?.match(/\.[a-z0-9]+$/i)?.[0] || ".mp4").toLowerCase()
-          const dir = fs.mkdtempSync(path.join(os.tmpdir(), "holly-tg-vid-"))
-          tmpPath = path.join(dir, `video${ext}`)
-          fs.writeFileSync(tmpPath, buf)
+          const filename = safeFilename(vid.file_name ?? `video${ext}`)
+          // Persisted (not a temp file): the agent gets the real path and the
+          // engine must NOT delete it after frame sampling (temporary: false).
+          tmpPath = saveAttachment(chatId, m.message_id, filename, buf)
+          const shouldAnalyze = caption.trim().length > 0
           const incomingMsg: IncomingMessage = {
             conversationId: chatId.toString(),
             userId,
-            text: caption,
-            videos: [{ path: tmpPath, filename: vid.file_name ?? "video" }],
+            text: caption || `I'm sending you the video ${filename}. Ask what I want done with it before processing it.`,
+            videos: shouldAnalyze ? [{ path: tmpPath, filename, temporary: false }] : undefined,
+            attachments: [{ path: tmpPath, filename, mime: vid.mime_type, size: buf.length }],
           }
           await ctx.handleMessage("telegram", incomingMsg, responder)
         } catch (err: any) {

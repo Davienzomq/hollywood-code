@@ -72,8 +72,9 @@ export function createScheduler(deps: SchedulerDeps): SchedulerHandle {
         deps.log("cron", `job ${job.id} reported nothing — staying silent`)
         return
       }
-      const text = `⏰ Scheduled: ${job.prompt}\n\n${result}`.trim()
-      await deps.deliver(job.channelId, job.conversationId, text)
+      // Deliver only the task result. The prompt is internal scheduler metadata
+      // and exposing it adds technical noise to user-facing notifications.
+      await deps.deliver(job.channelId, job.conversationId, trimmed)
     } catch (err: any) {
       deps.log("cron", `job ${job.id} failed: ${err?.message ?? err}`)
       await deps

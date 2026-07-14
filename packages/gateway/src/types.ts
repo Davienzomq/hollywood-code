@@ -21,8 +21,11 @@ export interface IncomingMessage {
   audio?: boolean
   /** Image attachments (e.g. Telegram photos), as data URLs for the vision model. */
   images?: Array<{ url: string; mime: string; filename?: string }>
-  /** Video attachments (local temp file paths); frames are sampled for vision. */
-  videos?: Array<{ path: string; filename?: string }>
+  /** Video attachments (local file paths); frames are sampled for vision.
+   *  temporary: false = persisted attachment, the engine must not delete it. */
+  videos?: Array<{ path: string; filename?: string; temporary?: boolean }>
+  /** Files downloaded from the channel and exposed to the agent by absolute path. */
+  attachments?: Array<{ path: string; filename: string; mime?: string; size?: number }>
 }
 
 /** A permission request the agent raised mid-task, surfaced to the user. */

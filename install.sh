@@ -131,12 +131,19 @@ fi
 # fails the install. macOS: brew (symlinked so its dylibs resolve). Linux: build
 # from source if git+make/cmake exist. Otherwise the bot falls back to a voice
 # API key (set in the setup wizard). The gateway looks for $DEST/whisper/main.
-if [ ! -f "$DEST/whisper/main" ] || [ ! -f "$DEST/whisper/model.bin" ]; then
+# Model quality gate: under ~500MB means the old base model (poor accuracy) —
+# upgrade it to large-v3-turbo q5 instead of keeping it.
+model_ok=0
+if [ -f "$DEST/whisper/model.bin" ]; then
+  msize=$(wc -c < "$DEST/whisper/model.bin" 2>/dev/null || echo 0)
+  [ "$msize" -gt 500000000 ] && model_ok=1
+fi
+if [ ! -f "$DEST/whisper/main" ] || [ "$model_ok" -eq 0 ]; then
   echo "Installing offline voice transcription (whisper.cpp)..."
   mkdir -p "$DEST/whisper"
-  # model — small multilingual (~150MB); a larger one can be swapped in later
-  if [ ! -f "$DEST/whisper/model.bin" ]; then
-    curl -fsSL "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" -o "$DEST/whisper/model.bin" 2>/dev/null || true
+  # model — large-v3-turbo q5 (~574MB): best accuracy/speed balance, multilingual
+  if [ "$model_ok" -eq 0 ]; then
+    curl -fsSL "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin" -o "$DEST/whisper/model.bin" 2>/dev/null || true
   fi
   # binary → $DEST/whisper/main
   if [ ! -f "$DEST/whisper/main" ]; then

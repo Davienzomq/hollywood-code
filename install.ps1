@@ -293,26 +293,30 @@ try {
 Write-Step "Installing offline voice transcription (whisper.cpp)..."
 try {
     $wDir = Join-Path $DEST "whisper"
-    $wExe = Join-Path $wDir "main.exe"
+    # whisper.cpp >= 1.7.4: the real CLI is whisper-cli.exe (main.exe is a shim).
+    $wExe = Join-Path $wDir "whisper-cli.exe"
     $wModel = Join-Path $wDir "model.bin"
-    if ((Test-Path $wExe) -and (Test-Path $wModel)) {
-        Write-Ok "whisper already installed."
+    # Model quality gate: anything under 500MB is the old base model (poor
+    # accuracy) — upgrade it to large-v3-turbo q5 instead of keeping it.
+    $modelOk = (Test-Path $wModel) -and ((Get-Item $wModel).Length -gt 500MB)
+    if ((Test-Path $wExe) -and $modelOk) {
+        Write-Ok "whisper already installed (turbo model)."
     } else {
         New-Item -ItemType Directory -Force $wDir | Out-Null
         $wTmp = Join-Path $env:TEMP ("whdl-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Force $wTmp | Out-Null
-        # binary (main.exe + dlls)
+        # binary (whisper-cli.exe + ggml dlls)
         if (-not (Test-Path $wExe)) {
-            Invoke-WebRequest -Uri "https://github.com/ggerganov/whisper.cpp/releases/download/v1.5.4/whisper-bin-x64.zip" -OutFile (Join-Path $wTmp "w.zip") -UseBasicParsing
+            Invoke-WebRequest -Uri "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip" -OutFile (Join-Path $wTmp "w.zip") -UseBasicParsing
             Expand-Archive -Path (Join-Path $wTmp "w.zip") -DestinationPath $wTmp -Force
             Get-ChildItem -Recurse $wTmp -Include *.exe, *.dll | ForEach-Object { Copy-Item -Force $_.FullName $wDir }
         }
-        # small multilingual model (~150MB) — fast default; medium via the script
-        if (-not (Test-Path $wModel)) {
-            Invoke-WebRequest -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" -OutFile $wModel -UseBasicParsing
+        # large-v3-turbo q5 (~574MB): best accuracy/speed balance, multilingual
+        if (-not $modelOk) {
+            Invoke-WebRequest -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin" -OutFile $wModel -UseBasicParsing
         }
         Remove-Item -Recurse -Force $wTmp -ErrorAction SilentlyContinue
-        Write-Ok "Voice transcription ready (offline, multilingual)."
+        Write-Ok "Voice transcription ready (offline, multilingual, turbo model)."
     }
 } catch {
     Write-Ok "whisper skipped (optional) — run scripts\install-whisper.ps1 for offline voice, or set a voice API key."
