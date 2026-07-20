@@ -413,6 +413,11 @@ export async function createEngine(config: GatewayConfig): Promise<{
   const turnStarted = new Map<string, number>()
   // owner sessionID → files created/edited/deleted this turn (relative paths).
   const turnFiles = new Map<string, Map<string, string>>()
+  // owner sessionID → the request that started the running turn (context for the
+  // side chat, so the agent can talk about what its subagents are doing).
+  const turnRequest = new Map<string, string>()
+  // conversation key → side-chat session used while the main agent supervises.
+  const sideSessions = new Map<string, string>()
   // Coalesce status edits: Telegram allows ~1 edit/sec per message, and a burst
   // of quick tool completions used to fire an edit per event — 429s and dropped
   // updates. At most one edit per 1.2s per session, with a trailing flush so the
@@ -548,6 +553,19 @@ export async function createEngine(config: GatewayConfig): Promise<{
     out.push("", "(Live status — the work continues; nothing was interrupted.)")
     return out.join("\n")
   }
+  /**
+   * True when the main agent is only SUPERVISING: it dispatched subagents and is
+   * itself idle (no tool of its own besides the `task` call it is blocked on).
+   * In that state the user can keep talking to it about anything; when the agent
+   * is doing the work itself, messages queue instead.
+   */
+  const parentSupervising = (owner: string): boolean => {
+    if (!statusHandles.has(owner)) return false
+    const children = sessionsOf(owner).filter((s) => s !== owner)
+    if (!children.length) return false
+    const own = statusRunning.get(owner)
+    return !own || /\btask\b/.test(own)
+  }
   // Questions the gateway can answer itself while the agent is busy (PT + EN).
   const STATUS_QUESTION =
     /\b(o que|oque|que)\b.{0,40}\b(faz|fazendo|acontec\w*|rolando|andando)|\bwhat\b.{0,40}\b(doing|happening|going on)|\b(status|progresso|progress|andamento)\b|\b(ainda|still)\b.{0,25}\b(trabalh\w*|working|rodando|running|ativo)|\b(terminou|acabou|finalizou|pronto|done|finished|ready)\b\??$|\bquanto (falta|tempo|demora)\b|\bcom[oó] (est[aá]|vai|ta|t[aá])\b/i
@@ -613,6 +631,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
             if (statusHandles.has(parent0) && !childModelAnnounced.has(info.sessionID)) {
               childModelAnnounced.add(info.sessionID)
               const lines0 = statusLines.get(parent0) ?? []
+              lines0.push(`🤖 subagent cast: ${childModel.get(info.sessionID)}`)
               statusLines.set(parent0, lines0)
               pushStatusEdit(parent0, renderStatus(parent0))
             }
@@ -1758,6 +1777,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     statusLines.set(sessionId, [])
     turnStarted.set(sessionId, Date.now()) // elapsed time for the live report
     turnFiles.delete(sessionId) // files are reported per turn
+    turnRequest.set(sessionId, (msg.text || "(media/attachment)").slice(0, 600)) // side-chat context
 
     await resolvePending(sessionId, responder)
 
@@ -2007,6 +2027,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
     if (feed?.timer) clearTimeout(feed.timer)
     fileFeed.delete(sessionId)
     turnStarted.delete(sessionId)
+    turnRequest.delete(sessionId)
     for (const [child, parent] of childToParent) {
       if (parent === sessionId) {
         statusRunning.delete(child) // subagent slots are per real session now
@@ -2100,6 +2121,88 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // CONCURRENTLY against the same session (interleaved turns, racing results).
   // Queue them in arrival order; the user is told when a message is queued.
   // Commands (/stop, /model, …) intentionally BYPASS this queue.
+  /**
+   * Talk to the agent WHILE its subagents work.
+   *
+   * The server runs one prompt at a time per session, so the reply is produced in
+   * a persistent side session for this conversation, seeded with what the crew is
+   * doing (live status + the request that started it). To the user it is the same
+   * assistant: it answers anything — questions about the work, or any other
+   * subject — and it can read files to check things. The running task is never
+   * touched.
+   */
+  const chatWhileSupervising = async (
+    channelId: string,
+    conversationId: string,
+    msg: Parameters<typeof handleMessageInner>[1],
+    responder: Responder,
+    busySid: string,
+  ): Promise<void> => {
+    const key = sessionKey(channelId, conversationId)
+    let side = sideSessions.get(key)
+    if (side) {
+      const alive = await opencode.client.session
+        .get({ path: { id: side } })
+        .then((r: any) => !!r?.data)
+        .catch(() => false)
+      if (!alive) {
+        sideSessions.delete(key)
+        side = undefined
+      }
+    }
+    if (!side) {
+      const created = await opencode.client.session
+        .create({ body: { title: "side chat (crew working)" } })
+        .catch(() => null)
+      if (!created?.data) {
+        await responder.sendText("📥 Queued — I'll take this right after the current task.").catch(() => {})
+        return
+      }
+      side = (created.data as any).id
+      sideSessions.set(key, side!)
+    }
+
+    await responder.typing().catch(() => {})
+    const prompt =
+      "[You are the same assistant this user is talking to. Right now YOUR SUBAGENTS are running a task " +
+      "in the background and you are free to talk — the work continues untouched.]\n\n" +
+      `[Original request that started the work]\n${turnRequest.get(busySid) ?? "(unknown)"}\n\n` +
+      `[Live status of that work — read it before answering questions about progress]\n${liveWorkReport(busySid)}\n\n` +
+      `[Project directory] ${DIRECTORY}\n\n` +
+      "[User message]\n" + (msg.text || "(empty)") + "\n\n" +
+      "Answer the user directly, in their language, as their assistant. If they ask about the work, use the live " +
+      "status above (you may READ files in the project to check details, but do NOT edit anything — the crew is " +
+      "working on those files right now). For anything else, just answer normally."
+
+    // Cast the same way a normal message would be, so /model and auto both hold.
+    let model = config.model && config.model !== "auto" && config.model !== "mix" ? defaultModel : undefined
+    let variant = config.effort
+    if (config.model === "auto" || config.model === "mix") {
+      const cast = config.model === "auto" ? await castForAuto(msg.text) : await castForMix(msg.text)
+      model = cast.model
+      variant = cast.variant
+    }
+    const { result } = await promptWithFallback(side!, [{ type: "text", text: prompt }], model, variant, {
+      allowFallback: true,
+    })
+    const sideParts = (result?.data as any)?.parts as Array<{ type: string; text?: string }> | undefined
+    const reply = sideParts?.filter((p) => p.type === "text").map((p) => p.text || "").join("\n").trim()
+    if (!reply) {
+      await responder.sendText("⚠️ I couldn't answer that right now — the crew is still working.").catch(() => {})
+      return
+    }
+    // Voice in → voice out, same rule as the main conversation.
+    if ((msg as any).audio && speaker && responder.sendVoice) {
+      try {
+        await responder.sendVoice(await speaker.synthesize(reply))
+        return
+      } catch {
+        /* fall through to text */
+      }
+    }
+    await responder.sendText(reply).catch(() => {})
+  }
+
   const turnQueues = new Map<string, Promise<void>>()
   const handleMessage = (
     channelId: string,
@@ -2109,17 +2212,24 @@ export async function createEngine(config: GatewayConfig): Promise<{
     const qkey = `${channelId}:${msg.conversationId}`
     const prev = turnQueues.get(qkey)
     if (prev) {
-      // The conversation stays ALIVE while the agent works: asking what's going
-      // on is answered right now from live state (subagents, their models, the
-      // tool in flight, files written) instead of waiting in the queue. The work
-      // is never touched — this is a read of what is already happening.
       const busySid = sessionMap.get(sessionKey(channelId, msg.conversationId))
-      if (busySid && statusHandles.has(busySid) && STATUS_QUESTION.test(msg.text ?? "")) {
-        void responder.sendText(liveWorkReport(busySid)).catch(() => {})
-        return Promise.resolve()
+      if (busySid && statusHandles.has(busySid)) {
+        // The agent only DISPATCHED subagents and is idle itself → the
+        // conversation stays fully open: talk to it about anything, and it can
+        // look at what the crew is doing. Nothing is queued, nothing interrupted.
+        if (parentSupervising(busySid)) {
+          void chatWhileSupervising(channelId, msg.conversationId, msg, responder, busySid).catch(() => {})
+          return Promise.resolve()
+        }
+        // The agent is doing the work ITSELF → messages queue. A progress
+        // question is still answered instantly from live state (free, no model).
+        if (STATUS_QUESTION.test(msg.text ?? "")) {
+          void responder.sendText(liveWorkReport(busySid)).catch(() => {})
+          return Promise.resolve()
+        }
       }
       void responder
-        .sendText("📥 Queued — I'll take this right after the current task. (Ask \"what's going on?\" anytime for a live status.)")
+        .sendText("📥 Queued — I'm working on the previous task myself; I'll take this next.")
         .catch(() => {})
     }
     const run = (prev ?? Promise.resolve()).then(() => handleMessageInner(channelId, msg, responder))
@@ -2361,6 +2471,7 @@ export async function createEngine(config: GatewayConfig): Promise<{
       case "clear": {
         const key = sessionKey(channelId, conversationId)
         sessionMap.delete(key)
+        sideSessions.delete(key) // the side chat belongs to the old session too
         saveStore()
         await responder.sendText("🆕 New session. Send your next message to begin.")
         break
