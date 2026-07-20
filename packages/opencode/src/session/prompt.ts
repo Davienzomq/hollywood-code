@@ -651,7 +651,15 @@ export const layer = Layer.effect(
       }).pipe(Effect.option)
       if (Option.isNone(base)) return undefined
       const { tier } = HollywoodRouter.scoreMessage(text)
-      const candidates = HollywoodRouter.candidatesFor(base.value.providerID, tier)
+      // Pass the provider's LIVE model ids so the router can discover new
+      // generations instead of being limited to the hardcoded names.
+      const live = yield* provider
+        .getProvider(base.value.providerID)
+        .pipe(
+          Effect.map((p) => Object.keys(p.models ?? {})),
+          Effect.catch(() => Effect.succeed([] as string[])),
+        )
+      const candidates = HollywoodRouter.candidatesFor(base.value.providerID, tier, live)
       for (const candidate of candidates) {
         const candidateID = ModelV2.ID.make(candidate)
         const found = yield* provider.getModel(base.value.providerID, candidateID).pipe(Effect.option)

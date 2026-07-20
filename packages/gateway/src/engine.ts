@@ -387,7 +387,10 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // stalled" (a quota/credit error the SDK retries with no output), so it only
   // falls back on a real stall — never on a long-running task.
   const lastActivity = new Map<string, number>()
-  // sessionID → the tool currently RUNNING (transient last status line).
+  // REAL sessionID (parent OR subagent child) → the tool currently RUNNING.
+  // Keyed by the session that actually runs the tool: a child completing its own
+  // tool used to erase the PARENT's entry, which killed the "a running tool means
+  // work" keep-alive and let the watchdog abort a live subagent mid-patch.
   const statusRunning = new Map<string, string>()
   // sessionID → hard provider-limit error text (credits/quota/rate) detected in
   // the live event stream via "retry" parts. This is the ONLY trigger allowed to
@@ -404,6 +407,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
   // Children whose cast model was already announced in the parent status (once
   // per subagent — the user verifies the router dispatched the right double).
   const childModelAnnounced = new Set<string>()
+  // child sessionID → "provider/model · variant", for the live work report.
+  const childModel = new Map<string, string>()
+  // owner sessionID → when the current turn started (elapsed time in reports).
+  const turnStarted = new Map<string, number>()
+  // owner sessionID → files created/edited/deleted this turn (relative paths).
+  const turnFiles = new Map<string, Map<string, string>>()
   // Coalesce status edits: Telegram allows ~1 edit/sec per message, and a burst
   // of quick tool completions used to fire an edit per event — 429s and dropped
   // updates. At most one edit per 1.2s per session, with a trailing flush so the
@@ -429,6 +438,120 @@ export async function createEngine(config: GatewayConfig): Promise<{
       }, 1200 - since)
     }
   }
+  // Every session that belongs to one conversation turn: the parent plus every
+  // subagent it spawned. Used for both rendering and the "is work alive?" check.
+  const sessionsOf = (owner: string): string[] => {
+    const out = [owner]
+    for (const [child, parent] of childToParent) if (parent === owner) out.push(child)
+    return out
+  }
+  /** True while the parent or ANY of its subagents has a tool in flight. */
+  const hasActiveWork = (owner: string): boolean => sessionsOf(owner).some((s) => statusRunning.has(s))
+  const fmtElapsed = (ms: number) => {
+    const s = Math.round(ms / 1000)
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`
+  }
+  /** The status message body: recent lines + every tool currently running. */
+  const renderStatus = (owner: string, note?: string): string => {
+    const lines = statusLines.get(owner) ?? []
+    const running = sessionsOf(owner)
+      .map((s) => statusRunning.get(s))
+      .filter((x): x is string => !!x)
+    return "🎬 working...\n" + [...lines.slice(-8), ...running, ...(note ? [note] : [])].join("\n")
+  }
+  // ── Live file feed ────────────────────────────────────────────────────────
+  // Every file the agent (or a subagent) creates/edits/deletes is reported in
+  // the chat as it happens, so the user follows the build from start to finish.
+  // Batched ~2.5s so a burst of writes becomes ONE message instead of flooding.
+  const FILE_VERB: Record<string, { icon: string; verb: string }> = {
+    add: { icon: "📄", verb: "created" },
+    edit: { icon: "📝", verb: "edited" },
+    delete: { icon: "🗑", verb: "deleted" },
+  }
+  const fileFeed = new Map<string, { pending: Map<string, string>; timer?: ReturnType<typeof setTimeout> }>()
+  const noteFiles = (owner: string, entries: Array<{ path: string; type: string }>) => {
+    if (!entries.length) return
+    const all = turnFiles.get(owner) ?? new Map<string, string>()
+    for (const e of entries) all.set(e.path, e.type)
+    turnFiles.set(owner, all)
+
+    const st = fileFeed.get(owner) ?? { pending: new Map<string, string>() }
+    for (const e of entries) st.pending.set(e.path, e.type)
+    fileFeed.set(owner, st)
+    if (st.timer) return
+    st.timer = setTimeout(() => {
+      st.timer = undefined
+      const list = [...st.pending.entries()]
+      st.pending.clear()
+      const r = activeResponders.get(owner)
+      if (!r || !list.length) return
+      const rows = list.slice(0, 20).map(([p, t]) => {
+        const v = FILE_VERB[t] ?? FILE_VERB.edit!
+        return `${v.icon} ${v.verb}: ${p}`
+      })
+      const more = list.length > 20 ? `\n…and ${list.length - 20} more` : ""
+      void r.sendText(rows.join("\n") + more).catch(() => {})
+    }, 2500)
+  }
+  /** Files touched by a completed tool part (write/edit/patch shapes differ). */
+  const filesFromTool = (tool: string, st: any): Array<{ path: string; type: string }> => {
+    const rel = (p: string) => {
+      const s = String(p ?? "")
+      if (!s) return ""
+      const base = DIRECTORY.replace(/\\/g, "/")
+      const norm = s.replace(/\\/g, "/")
+      return norm.startsWith(base) ? norm.slice(base.length).replace(/^\//, "") : norm
+    }
+    // apply_patch / patch: metadata.files[] carries relativePath + type.
+    const meta = st?.metadata?.files
+    if (Array.isArray(meta) && meta.length) {
+      return meta
+        .map((f: any) => ({ path: f.relativePath || rel(f.filePath), type: String(f.type ?? "edit") }))
+        .filter((f: any) => f.path)
+    }
+    if (tool === "write" || tool === "edit") {
+      const p = rel(st?.input?.filePath)
+      if (p) return [{ path: p, type: tool === "write" ? "add" : "edit" }]
+    }
+    return []
+  }
+
+  // ── Live work report ──────────────────────────────────────────────────────
+  // While a turn is running the conversation used to be frozen: any message
+  // waited in the queue, so the user couldn't even ask what the subagents were
+  // doing. This answers that question INSTANTLY from real state (no model call,
+  // no cost, no interference with the work in flight).
+  const liveWorkReport = (owner: string): string => {
+    const started = turnStarted.get(owner)
+    const head = started ? `🎬 Still working — ${fmtElapsed(Date.now() - started)} elapsed` : "🎬 Still working"
+    const out: string[] = [head]
+
+    const children = sessionsOf(owner).filter((s) => s !== owner)
+    if (children.length) {
+      out.push("", `🤖 Subagents (${children.length}):`)
+      for (const c of children) {
+        const running = statusRunning.get(c)
+        out.push(`  • ${childModel.get(c) ?? "casting…"} — ${running ? running.replace(/^⏳ (↳ 🤖 )?/, "") : "thinking/writing…"}`)
+      }
+    }
+    const own = statusRunning.get(owner)
+    if (own) out.push("", `Main agent: ${own.replace(/^⏳ /, "")}`)
+    else if (children.length) out.push("", "Main agent: waiting for the subagents.")
+
+    const files = turnFiles.get(owner)
+    if (files?.size) {
+      const names = [...files.keys()]
+      out.push("", `📁 Files so far (${names.length}): ${names.slice(-8).join(", ")}${names.length > 8 ? " …" : ""}`)
+    }
+    const lines = statusLines.get(owner) ?? []
+    if (lines.length) out.push("", "Recent steps:", ...lines.slice(-5))
+    out.push("", "(Live status — the work continues; nothing was interrupted.)")
+    return out.join("\n")
+  }
+  // Questions the gateway can answer itself while the agent is busy (PT + EN).
+  const STATUS_QUESTION =
+    /\b(o que|oque|que)\b.{0,40}\b(faz|fazendo|acontec\w*|rolando|andando)|\bwhat\b.{0,40}\b(doing|happening|going on)|\b(status|progresso|progress|andamento)\b|\b(ainda|still)\b.{0,25}\b(trabalh\w*|working|rodando|running|ativo)|\b(terminou|acabou|finalizou|pronto|done|finished|ready)\b\??$|\bquanto (falta|tempo|demora)\b|\bcom[oó] (est[aá]|vai|ta|t[aá])\b/i
+
   const clearStatusEdit = (sessionID: string) => {
     const st = statusEditState.get(sessionID)
     if (st?.timer) clearTimeout(st.timer)
@@ -485,14 +608,13 @@ export async function createEngine(config: GatewayConfig): Promise<{
           // so the user can verify the router dispatched the right double.
           if (info?.role === "assistant" && info.modelID && childToParent.has(info.sessionID)) {
             const parent0 = childToParent.get(info.sessionID)!
+            const variant0 = info.variant && info.variant !== "default" ? ` · ${info.variant}` : ""
+            childModel.set(info.sessionID, `${info.providerID}/${info.modelID}${variant0}`)
             if (statusHandles.has(parent0) && !childModelAnnounced.has(info.sessionID)) {
               childModelAnnounced.add(info.sessionID)
               const lines0 = statusLines.get(parent0) ?? []
-              const variant0 = info.variant && info.variant !== "default" ? ` · ${info.variant}` : ""
-              lines0.push(`🤖 subagent cast: ${info.providerID}/${info.modelID}${variant0}`)
               statusLines.set(parent0, lines0)
-              const running0 = statusRunning.get(parent0)
-              pushStatusEdit(parent0, "🎬 working...\n" + [...lines0.slice(-8), ...(running0 ? [running0] : [])].join("\n"))
+              pushStatusEdit(parent0, renderStatus(parent0))
             }
           }
           // Assistant-message errors carry the REAL provider failure (credits,
@@ -559,24 +681,25 @@ export async function createEngine(config: GatewayConfig): Promise<{
         const sub = owner !== part.sessionID ? "↳ 🤖 " : ""
         const lines = statusLines.get(owner) ?? []
         const st: any = part.state
+        // Keyed by the REAL session, so a child's completion can't clear the
+        // parent's still-running `task` tool (that erasure caused the abort).
         if (st.status === "running") {
           // Live line for the tool in flight — long bash/computeruse steps show
           // up immediately instead of only after they complete.
-          statusRunning.set(owner, `⏳ ${sub}${part.tool}${st.title ? ` — ${st.title}` : "…"}`)
+          statusRunning.set(part.sessionID, `⏳ ${sub}${part.tool}${st.title ? ` — ${st.title}` : "…"}`)
         } else if (st.status === "completed") {
           lines.push(`✓ ${sub}${part.tool} — ${st.title}`)
           statusLines.set(owner, lines)
-          statusRunning.delete(owner)
+          statusRunning.delete(part.sessionID)
+          noteFiles(owner, filesFromTool(part.tool, st)) // live file feed
         } else if (st.status === "error") {
           lines.push(`✗ ${sub}${part.tool} — ${st.error ?? "error"}`)
           statusLines.set(owner, lines)
-          statusRunning.delete(owner)
+          statusRunning.delete(part.sessionID)
         } else {
           continue
         }
-        const running = statusRunning.get(owner)
-        const text = "🎬 working...\n" + [...lines.slice(-8), ...(running ? [running] : [])].join("\n")
-        pushStatusEdit(owner, text)
+        pushStatusEdit(owner, renderStatus(owner))
       }
           if (sig.aborted) break
           log("engine", "event stream ended — reconnecting")
@@ -1453,8 +1576,15 @@ export async function createEngine(config: GatewayConfig): Promise<{
     // limit (credits/quota/rate, stamped live from "retry" parts by the event
     // stream); only that may engage the fallback. A generous silent window plus
     // an absolute ceiling catch true zombies with a clear error — no substitution.
-    const SILENT_MS = 5 * 60_000 // no events AND no tool running for 5min → give up
-    const HARD_CEIL_MS = 60 * 60_000 // absolute ceiling for a single turn
+    // Work in flight is NEVER cancelled (user spec: don't abort, don't go quiet,
+    // don't waste money on a cancelled long patch). While the parent or ANY
+    // subagent has a tool running, the turn is alive no matter how long the model
+    // takes between events — a big apply_patch streams for minutes in silence.
+    // Only two things end a turn early: a hard provider limit (credits/quota), or
+    // a truly dead session (no events, no tools anywhere) past a long window.
+    const SILENT_MS = 12 * 60_000 // nothing at all happening for 12min → zombie
+    const HARD_CEIL_MS = 6 * 60 * 60_000 // safety ceiling only (never hit in practice)
+    const BEAT_MS = 25_000 // heartbeat so the status never looks frozen
     const runFirst = async () => {
       if (!isPinnedPaid) return run(model)
       const started = Date.now()
@@ -1464,15 +1594,28 @@ export async function createEngine(config: GatewayConfig): Promise<{
       const TIMEOUT = Symbol("timeout")
       const HARDSTOP = Symbol("hardstop")
       let timer: ReturnType<typeof setInterval> | undefined
+      let lastBeat = Date.now()
       const stallWatch = new Promise<typeof TIMEOUT | typeof HARDSTOP>((res) => {
         timer = setInterval(() => {
           const now = Date.now()
           if (hardLimitHit.has(sessionId)) return res(HARDSTOP)
-          // A tool in flight IS work — keep the activity stamp fresh while it runs.
-          if (statusRunning.has(sessionId)) lastActivity.set(sessionId, now)
+          // A tool in flight IS work — in the parent OR in any subagent.
+          const working = hasActiveWork(sessionId)
+          if (working) lastActivity.set(sessionId, now)
+          // Heartbeat: refresh the status with the elapsed time so the user can
+          // SEE it is still working during long silent stretches (big patches,
+          // deep reasoning) instead of staring at a frozen "working".
+          if (statusHandles.has(sessionId) && now - lastBeat > BEAT_MS) {
+            lastBeat = now
+            const quiet = Math.round((now - (lastActivity.get(sessionId) ?? started)) / 1000)
+            const note = working
+              ? `⏱ still working — ${fmtElapsed(now - started)} elapsed`
+              : `⏱ still working — ${fmtElapsed(now - started)} elapsed · model thinking/writing for ${quiet}s`
+            pushStatusEdit(sessionId, renderStatus(sessionId, note))
+          }
           const idle = now - (lastActivity.get(sessionId) ?? started)
           if (now - started > HARD_CEIL_MS) return res(TIMEOUT)
-          if (idle > SILENT_MS) res(TIMEOUT)
+          if (!working && idle > SILENT_MS) res(TIMEOUT)
         }, 5000)
       })
       const raced = await Promise.race([run(model), stallWatch])
@@ -1613,6 +1756,8 @@ export async function createEngine(config: GatewayConfig): Promise<{
     const statusHandle = await responder.startStatus("🎬 working...")
     statusHandles.set(sessionId, statusHandle)
     statusLines.set(sessionId, [])
+    turnStarted.set(sessionId, Date.now()) // elapsed time for the live report
+    turnFiles.delete(sessionId) // files are reported per turn
 
     await resolvePending(sessionId, responder)
 
@@ -1849,10 +1994,25 @@ export async function createEngine(config: GatewayConfig): Promise<{
     autoResolved.delete(sessionId)
     hardLimitHit.delete(sessionId)
     lastStreamError.delete(sessionId)
+    // Flush any pending file-feed batch before the responder goes away, so the
+    // last files written are still reported.
+    const feed = fileFeed.get(sessionId)
+    if (feed?.pending.size) {
+      const rows = [...feed.pending.entries()].slice(0, 20).map(([p, t]) => {
+        const v = FILE_VERB[t] ?? FILE_VERB.edit!
+        return `${v.icon} ${v.verb}: ${p}`
+      })
+      await responder.sendText(rows.join("\n")).catch(() => {})
+    }
+    if (feed?.timer) clearTimeout(feed.timer)
+    fileFeed.delete(sessionId)
+    turnStarted.delete(sessionId)
     for (const [child, parent] of childToParent) {
       if (parent === sessionId) {
+        statusRunning.delete(child) // subagent slots are per real session now
         childToParent.delete(child)
         childModelAnnounced.delete(child)
+        childModel.delete(child)
       }
     }
 
@@ -1948,7 +2108,20 @@ export async function createEngine(config: GatewayConfig): Promise<{
   ): Promise<void> => {
     const qkey = `${channelId}:${msg.conversationId}`
     const prev = turnQueues.get(qkey)
-    if (prev) void responder.sendText("📥 Queued — I'll take this right after the current task.").catch(() => {})
+    if (prev) {
+      // The conversation stays ALIVE while the agent works: asking what's going
+      // on is answered right now from live state (subagents, their models, the
+      // tool in flight, files written) instead of waiting in the queue. The work
+      // is never touched — this is a read of what is already happening.
+      const busySid = sessionMap.get(sessionKey(channelId, msg.conversationId))
+      if (busySid && statusHandles.has(busySid) && STATUS_QUESTION.test(msg.text ?? "")) {
+        void responder.sendText(liveWorkReport(busySid)).catch(() => {})
+        return Promise.resolve()
+      }
+      void responder
+        .sendText("📥 Queued — I'll take this right after the current task. (Ask \"what's going on?\" anytime for a live status.)")
+        .catch(() => {})
+    }
     const run = (prev ?? Promise.resolve()).then(() => handleMessageInner(channelId, msg, responder))
     const cleanup = () => {
       if (turnQueues.get(qkey) === tracked) turnQueues.delete(qkey)
@@ -2195,6 +2368,12 @@ export async function createEngine(config: GatewayConfig): Promise<{
 
       case "status": {
         if (!sid) { await responder.sendText("No active session."); break }
+        // Commands bypass the turn queue, so /status works DURING a long task:
+        // lead with the live work report (subagents, their models, files).
+        if (statusHandles.has(sid)) {
+          await responder.sendText(liveWorkReport(sid))
+          break
+        }
         const s = await opencode.client.session.get({ path: { id: sid } }).catch(() => null)
         const m = s?.data ? `${(s.data as any).title} (${sid.slice(0, 12)}…)` : sid
         const modelLine =

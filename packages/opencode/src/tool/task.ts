@@ -10,8 +10,11 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
+import { Provider } from "@/provider/provider"
 import * as HollywoodRouter from "@/hollywood/router"
-import { Effect, Exit, Schema, Scope } from "effect"
+import { Effect, Exit, Option, Schema, Scope } from "effect"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
@@ -50,6 +53,10 @@ const BaseParameterFields = {
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
+  model: Schema.optional(Schema.String).annotate({
+    description:
+      "Which model the subagent should run. Accepts a tier/role word — 'sol' (frontier/star), 'terra' (mid), 'luna' (small/double), or high/mid/low — or an exact model id ('gpt-5.6-sol', 'provider/model'). Omit to let the router cast the model from the subtask content. Set it when the user asks for a specific model.",
+  }),
 }
 
 const BaseParameters = Schema.Struct(BaseParameterFields)
@@ -164,12 +171,40 @@ export const TaskTool = Tool.define(
       )
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
+      const parentProviderID = msg.info.providerID
+      const parentModelID = msg.info.modelID
+
+      // Explicit request wins: `model` accepts a role word (sol/terra/luna,
+      // high/mid/low), an exact id, or "provider/model" — so "dispatch a sol
+      // subagent" really dispatches the frontier model instead of silently
+      // inheriting the parent's. Unresolvable values fall through to the router.
+      // Provider is an OPTIONAL service here: resolving an alias needs the live
+      // model list, but the tool must not gain a hard dependency (test harness).
+      const requested = yield* Effect.gen(function* () {
+        const raw = params.model?.trim()
+        if (!raw) return undefined
+        const svc = yield* Effect.serviceOption(Provider.Service)
+        if (Option.isNone(svc)) return undefined
+        const [maybeProvider, ...rest] = raw.split("/")
+        const hasProvider = rest.length > 0
+        const providerID = hasProvider ? maybeProvider! : parentProviderID
+        const alias = hasProvider ? rest.join("/") : raw
+        const info = yield* svc.value.getProvider(ProviderV2.ID.make(providerID)).pipe(Effect.option)
+        if (Option.isNone(info)) return undefined
+        const available = Object.keys(info.value.models ?? {})
+        const resolved = HollywoodRouter.resolveAlias(providerID, alias, available)
+        return resolved ? { providerID: ProviderV2.ID.make(providerID), modelID: ModelV2.ID.make(resolved) } : undefined
+      })
+      if (params.model && !requested) {
+        yield* Effect.logInfo(`task: could not resolve model "${params.model}" — letting the router cast it`)
+      }
 
       // Hollywood: when the subagent has no pinned model and the router is on,
       // leave the model undefined so the child session is cast per subtask
       // content (cheap subtasks get doubles, hard ones the star). Router off =
       // upstream behavior: inherit the parent model.
       const model =
+        requested ??
         next.model ??
         (HollywoodRouter.isEnabled()
           ? undefined
@@ -199,7 +234,9 @@ export const TaskTool = Tool.define(
           sessionID: nextSession.id,
           // undefined model = Hollywood auto mode for this subtask
           model: model ? { modelID: model.modelID, providerID: model.providerID } : undefined,
-          variant: next.model ? undefined : variant,
+          // A model chosen explicitly for this subtask keeps the parent's effort
+          // variant; a model pinned on the agent definition carries its own.
+          variant: requested ? variant : next.model ? undefined : variant,
           agent: next.name,
           parts,
         })

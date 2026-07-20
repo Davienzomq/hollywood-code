@@ -23,10 +23,11 @@ const TIER_CANDIDATES: Record<string, Record<Tier, string[]>> = {
     high: ["claude-fable-5", "claude-opus-4-8", "claude-opus-4-5", "claude-opus-4-1"],
   },
   openai: {
-    // Codex/ChatGPT OAuth exposes the gpt-5.x line; API keys expose nano/mini.
-    low: ["gpt-5.4-mini", "gpt-5-nano", "gpt-5-mini"],
-    mid: ["gpt-5.4", "gpt-5-mini", "gpt-5"],
-    high: ["gpt-5.5", "gpt-5.4-codex", "gpt-5.4", "gpt-5"],
+    // The gpt-5.6 generation renamed the tiers: luna (small) / terra (mid) /
+    // sol (frontier). Older 5.x names stay as fallbacks for API-key accounts.
+    low: ["gpt-5.6-luna", "gpt-5.6", "gpt-5.4-mini", "gpt-5-nano", "gpt-5-mini"],
+    mid: ["gpt-5.6-terra", "gpt-5.6", "gpt-5.4", "gpt-5"],
+    high: ["gpt-5.6-sol", "gpt-5.6-pro", "gpt-5.5", "gpt-5.4-codex", "gpt-5"],
   },
   google: {
     low: ["gemini-3-flash", "gemini-2.5-flash"],
@@ -95,10 +96,85 @@ function userTiers() {
   return envTiers
 }
 
-export function candidatesFor(providerID: string, tier: Tier): string[] {
+// Newest-first version ordering: "5.6" > "5.4" > "5".
+function compareVersions(a: string, b: string): number {
+  const left = a.split(".").map(Number)
+  const right = b.split(".").map(Number)
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const delta = (right[i] ?? 0) - (left[i] ?? 0)
+    if (delta) return delta
+  }
+  return 0
+}
+
+// DYNAMIC tier discovery — one parser per provider family, so a provider that
+// ships a NEW generation is picked up automatically instead of leaving the
+// router stuck on the hardcoded (now old) names. `penalty` pushes variant
+// builds (-fast/-pro) behind the canonical model of the same version.
+const FAMILIES: Record<string, (id: string) => { tier: Tier; version: string; penalty: number } | undefined> = {
+  openai: (id) => {
+    const m = /^gpt-(\d+(?:\.\d+)*?)-(luna|terra|sol)(?:-(fast|pro))?$/.exec(id)
+    if (!m) return undefined
+    const tier: Tier = m[2] === "luna" ? "low" : m[2] === "terra" ? "mid" : "high"
+    return { tier, version: m[1]!, penalty: m[3] ? 1 : 0 }
+  },
+  anthropic: (id) => {
+    const m = /^claude-(fable|opus|sonnet|haiku)-(\d+(?:[.-]\d+)*)$/.exec(id)
+    if (!m) return undefined
+    const tier: Tier = m[1] === "haiku" ? "low" : m[1] === "sonnet" ? "mid" : "high"
+    const nums = m[2]!.split(/[.-]/)
+    const major = Number(nums[0] ?? 0) + (m[1] === "fable" ? 100 : 0) // fable outranks opus
+    return { tier, version: [String(major), ...nums.slice(1)].join("."), penalty: 0 }
+  },
+  google: (id) => {
+    const m = /^gemini-(\d+(?:\.\d+)*)-(flash-lite|flash|pro|ultra)$/.exec(id)
+    if (!m) return undefined
+    const tier: Tier = m[2] === "flash-lite" ? "low" : m[2] === "flash" ? "mid" : "high"
+    return { tier, version: m[1]!, penalty: m[2] === "pro" ? 1 : 0 } // ultra beats pro
+  },
+}
+
+/**
+ * Casting candidates for a tier, newest-first.
+ * `available` = the provider's live model ids; when given, models are DISCOVERED
+ * from it (so new generations work with no code change) and the static table is
+ * only the fallback tail. User HOLLYWOOD_TIERS entries always win.
+ */
+export function candidatesFor(providerID: string, tier: Tier, available?: string[]): string[] {
   const user = userTiers()?.[providerID]?.[tier]
   if (Array.isArray(user) && user.length) return user
-  return TIER_CANDIDATES[providerID]?.[tier] ?? []
+  const fallback = TIER_CANDIDATES[providerID]?.[tier] ?? []
+  const parse = FAMILIES[providerID]
+  if (!parse || !available?.length) return fallback
+  const discovered = available
+    .flatMap((id) => {
+      const d = parse(id)
+      return d && d.tier === tier ? [{ id, version: d.version, penalty: d.penalty }] : []
+    })
+    .sort((a, b) => compareVersions(a.version, b.version) || a.penalty - b.penalty)
+    .map((x) => x.id)
+  return [...new Set([...discovered, ...fallback])]
+}
+
+/**
+ * Resolve a human tier alias to a concrete model id of the provider.
+ * Accepts role words ("sol"/"star"/"high", "terra"/"mid", "luna"/"double"/"low"),
+ * a bare tier, or an exact model id — used by the task tool's `model` param so
+ * "dispatch a sol subagent" actually dispatches the frontier model.
+ */
+export function resolveAlias(providerID: string, alias: string, available: string[]): string | undefined {
+  const a = alias.trim().toLowerCase()
+  if (!a) return undefined
+  if (available.includes(alias)) return alias // exact id wins
+  const TIERS: Record<string, Tier> = {
+    sol: "high", star: "high", high: "high", frontier: "high", best: "high", pro: "high",
+    terra: "mid", mid: "mid", medium: "mid", double: "mid",
+    luna: "low", low: "low", small: "low", cheap: "low", fast: "low", mini: "low",
+  }
+  const tier = TIERS[a]
+  if (tier) return candidatesFor(providerID, tier, available).find((m) => available.includes(m))
+  // Substring match as a last resort ("5.6-sol", "opus", "haiku").
+  return available.find((m) => m.toLowerCase().includes(a))
 }
 
 const CODE_FENCE = /```|\n {4}\S/
